@@ -13,7 +13,12 @@
 
 import * as fc from "fast-check";
 import { RoomManager } from "../../core/RoomManager";
+import { MemoryStorage } from "../../storage/MemoryStorage";
 import { WebSocket } from "ws";
+
+function createRoomManager(): RoomManager {
+  return new RoomManager(new MemoryStorage());
+}
 
 // Mock WebSocket for testing
 class MockWebSocket {
@@ -31,25 +36,25 @@ describe("RoomManager Property Tests", () => {
      * Property: For any two createRoom calls, the returned room IDs should be different
      * Validates: Requirements 8.1
      */
-    it("should generate unique room IDs for all createRoom calls", () => {
-      fc.assert(
-        fc.property(
+    it("should generate unique room IDs for all createRoom calls", async () => {
+      await fc.assert(
+        fc.asyncProperty(
           fc.integer({ min: 2, max: 100 }), // number of rooms to create
-          (roomCount) => {
-            const roomManager = new RoomManager();
+          async (roomCount) => {
+            const roomManager = createRoomManager();
             const roomIds = new Set<string>();
 
             // Create multiple rooms
             for (let i = 0; i < roomCount; i++) {
-              const roomId = roomManager.createRoom();
+              const roomId = await roomManager.createRoom();
               roomIds.add(roomId);
             }
 
             // All room IDs should be unique
             expect(roomIds.size).toBe(roomCount);
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -73,9 +78,9 @@ describe("RoomManager Property Tests", () => {
             // Check all IDs are unique
             const uniqueIds = new Set(roomIds);
             expect(uniqueIds.size).toBe(roomIds.length);
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
   });
@@ -104,7 +109,7 @@ describe("RoomManager Property Tests", () => {
                 roomId,
                 `user${i}`,
                 `User${i}`,
-                socket as unknown as WebSocket
+                socket as unknown as WebSocket,
               );
             }
 
@@ -123,9 +128,9 @@ describe("RoomManager Property Tests", () => {
               expect(socket.sentMessages.length).toBe(1);
               expect(JSON.parse(socket.sentMessages[0])).toEqual(message);
             }
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -155,7 +160,7 @@ describe("RoomManager Property Tests", () => {
                 roomId,
                 userId,
                 `User${i}`,
-                socket as unknown as WebSocket
+                socket as unknown as WebSocket,
               );
             }
 
@@ -170,7 +175,7 @@ describe("RoomManager Property Tests", () => {
             roomManager.broadcastToRoom(
               roomId,
               message,
-              userIds[validExcludeIndex]
+              userIds[validExcludeIndex],
             );
 
             // Excluded user should not receive the message
@@ -182,9 +187,9 @@ describe("RoomManager Property Tests", () => {
                 expect(sockets[i].sentMessages.length).toBe(1);
               }
             }
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
   });
@@ -212,7 +217,7 @@ describe("RoomManager Property Tests", () => {
                 roomId,
                 userId,
                 `User${i}`,
-                socket as unknown as WebSocket
+                socket as unknown as WebSocket,
               );
             }
 
@@ -231,9 +236,9 @@ describe("RoomManager Property Tests", () => {
 
             // Room should be deleted
             expect(roomManager.roomExists(roomId)).toBe(false);
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -261,7 +266,7 @@ describe("RoomManager Property Tests", () => {
                   roomId,
                   `user${i}-${j}`,
                   `User${i}-${j}`,
-                  socket as unknown as WebSocket
+                  socket as unknown as WebSocket,
                 );
               }
             }
@@ -279,9 +284,9 @@ describe("RoomManager Property Tests", () => {
 
             // No rooms should exist
             expect(roomManager.getAllRooms().length).toBe(0);
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
   });
@@ -322,9 +327,9 @@ describe("RoomManager Property Tests", () => {
               const roomInfo = roomManager.getRoomInfo(nonExistentRoomId);
               expect(roomInfo).toBeNull();
             }
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -347,7 +352,7 @@ describe("RoomManager Property Tests", () => {
                 roomId,
                 `user${i}`,
                 `User${i}`,
-                socket as unknown as WebSocket
+                socket as unknown as WebSocket,
               );
             }
 
@@ -355,9 +360,9 @@ describe("RoomManager Property Tests", () => {
             const roomInfo = roomManager.getRoomInfo(roomId);
             expect(roomInfo).not.toBeNull();
             expect(roomInfo?.participantCount).toBe(participantCount);
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
   });
@@ -382,7 +387,7 @@ describe("RoomManager Property Tests", () => {
                 roomId,
                 `user${i}`,
                 `User${i}`,
-                socket as unknown as WebSocket
+                socket as unknown as WebSocket,
               );
             }
 
@@ -394,9 +399,9 @@ describe("RoomManager Property Tests", () => {
             expect(roomInfo?.participantCount).toBe(participantCount);
             expect(participantList.length).toBe(participantCount);
             expect(roomInfo?.participantCount).toBe(participantList.length);
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -413,7 +418,7 @@ describe("RoomManager Property Tests", () => {
               userId: fc.string({ minLength: 1, maxLength: 10 }),
               userName: fc.string({ minLength: 1, maxLength: 10 }),
             }),
-            { minLength: 1, maxLength: 20 }
+            { minLength: 1, maxLength: 20 },
           ),
           (actions) => {
             const roomManager = new RoomManager();
@@ -432,7 +437,7 @@ describe("RoomManager Property Tests", () => {
                     roomId,
                     action.userId,
                     action.userName,
-                    socket as unknown as WebSocket
+                    socket as unknown as WebSocket,
                   );
                   currentParticipants.add(action.userId);
                   hadParticipants = true;
@@ -448,7 +453,7 @@ describe("RoomManager Property Tests", () => {
               if (currentParticipants.size > 0) {
                 const roomInfo = roomManager.getRoomInfo(roomId);
                 expect(roomInfo?.participantCount).toBe(
-                  currentParticipants.size
+                  currentParticipants.size,
                 );
               } else if (hadParticipants) {
                 // Room should be deleted when empty (only if it had participants before)
@@ -458,9 +463,9 @@ describe("RoomManager Property Tests", () => {
                 expect(roomManager.roomExists(roomId)).toBe(true);
               }
             }
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -473,7 +478,7 @@ describe("RoomManager Property Tests", () => {
         fc.property(
           fc.array(
             fc.integer({ min: 0, max: 10 }), // participants per room
-            { minLength: 1, maxLength: 10 }
+            { minLength: 1, maxLength: 10 },
           ),
           (participantCounts) => {
             const roomManager = new RoomManager();
@@ -491,7 +496,7 @@ describe("RoomManager Property Tests", () => {
                   roomId,
                   `user${i}-${j}`,
                   `User${i}-${j}`,
-                  socket as unknown as WebSocket
+                  socket as unknown as WebSocket,
                 );
               }
 
@@ -511,9 +516,9 @@ describe("RoomManager Property Tests", () => {
               expect(roomInfo).toBeDefined();
               expect(roomInfo?.participantCount).toBe(expectedCount);
             }
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
   });

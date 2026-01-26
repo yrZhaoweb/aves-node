@@ -1,7 +1,18 @@
 import { WebSocket } from "ws";
+import { Redis } from "ioredis";
 import { RoomManager } from "./RoomManager";
 import { SignalingHandler } from "./SignalingHandler";
-import { AvesServerConfig, RoomInfo, SignalingMessage } from "../types/types";
+import {
+  AvesServerConfig,
+  RoomInfo,
+  InboundSignalingMessage,
+  OutboundSignalingMessage,
+  RedisConfig,
+} from "../types/types";
+import { IDataStorage } from "../storage/IDataStorage";
+import { MemoryStorage } from "../storage/MemoryStorage";
+import { RedisStorage } from "../storage/RedisStorage";
+import * as crypto from "crypto";
 
 /**
  * AvesServer is the main class for the aves-node signaling server
@@ -12,7 +23,8 @@ export class AvesServer {
   private roomManager: RoomManager;
   private signalingHandler: SignalingHandler;
   private config: AvesServerConfig;
-  private userSockets: Map<string, WebSocket> = new Map();
+  private storage: IDataStorage;
+  private connections: Set<WebSocket> = new Set();
 
   /**
    * Create a new AvesServer instance
@@ -22,14 +34,38 @@ export class AvesServer {
     this.config = {
       debug: config?.debug ?? false,
       roomTimeout: config?.roomTimeout ?? 0,
+      redis: config?.redis,
     };
 
-    this.roomManager = new RoomManager();
+    this.storage = this.initializeStorage();
+    this.roomManager = new RoomManager(this.storage);
     this.signalingHandler = new SignalingHandler(this.roomManager);
 
     if (this.config.debug) {
       console.log("[AvesServer] Initialized with config:", this.config);
     }
+  }
+
+  private initializeStorage(): IDataStorage {
+    if (this.config.redis) {
+      let redisClient: Redis;
+
+      if (this.config.redis instanceof Redis) {
+        redisClient = this.config.redis;
+      } else {
+        const redisConfig = this.config.redis as RedisConfig;
+        redisClient = new Redis({
+          host: redisConfig.host || "localhost",
+          port: redisConfig.port || 6379,
+          password: redisConfig.password,
+          db: redisConfig.db || 0,
+        });
+      }
+
+      return new RedisStorage(redisClient);
+    }
+
+    return new MemoryStorage();
   }
 
   /**
@@ -42,6 +78,7 @@ export class AvesServer {
       console.log("[AvesServer] New WebSocket connection");
     }
 
+    this.connections.add(ws);
     let currentUserId: string | undefined;
 
     // Handle incoming messages
@@ -55,6 +92,8 @@ export class AvesServer {
 
         this.routeMessage(ws, message, (userId) => {
           currentUserId = userId;
+        }).catch((error) => {
+          console.error("[AvesServer] Error handling message:", error);
         });
       } catch (error) {
         console.error("[AvesServer] Failed to parse message:", error);
@@ -67,6 +106,8 @@ export class AvesServer {
       if (this.config.debug) {
         console.log("[AvesServer] WebSocket connection closed");
       }
+
+      this.connections.delete(ws);
 
       if (currentUserId) {
         this.handleDisconnection(currentUserId);
@@ -83,23 +124,23 @@ export class AvesServer {
    * Route incoming messages to appropriate handlers
    * Requirements: 7.3
    */
-  private routeMessage(
+  private async routeMessage(
     ws: WebSocket,
-    message: any,
-    setUserId: (userId: string) => void
-  ): void {
-    if (!message || typeof message.type !== "string") {
-      this.sendError(ws, "Invalid message: missing type field");
+    message: unknown,
+    setUserId: (userId: string) => void,
+  ): Promise<void> {
+    if (!this.isValidInboundMessage(message)) {
+      this.sendError(ws, "Invalid message: missing or invalid type field");
       return;
     }
 
     switch (message.type) {
       case "create-room":
-        this.handleCreateRoom(ws);
+        await this.handleCreateRoom(ws, message);
         break;
 
       case "join-room":
-        this.handleJoinRoom(ws, message, setUserId);
+        await this.handleJoinRoom(ws, message, setUserId);
         break;
 
       case "leave-room":
@@ -118,21 +159,56 @@ export class AvesServer {
         this.handleIceCandidate(message);
         break;
 
-      default:
+      default: {
+        const exhaustiveCheck: never = message;
         if (this.config.debug) {
-          console.warn("[AvesServer] Unknown message type:", message.type);
+          console.warn(
+            "[AvesServer] Unknown message type:",
+            (exhaustiveCheck as { type: string }).type,
+          );
         }
-        this.sendError(ws, `Unknown message type: ${message.type}`);
+        this.sendError(
+          ws,
+          `Unknown message type: ${(message as { type: string }).type}`,
+        );
+      }
     }
+  }
+
+  /**
+   * Type guard to validate inbound message structure
+   */
+  private isValidInboundMessage(
+    message: unknown,
+  ): message is InboundSignalingMessage {
+    if (!message || typeof message !== "object") {
+      return false;
+    }
+    const msg = message as Record<string, unknown>;
+    return (
+      typeof msg.type === "string" &&
+      [
+        "create-room",
+        "join-room",
+        "leave-room",
+        "offer",
+        "answer",
+        "ice-candidate",
+      ].includes(msg.type)
+    );
   }
 
   /**
    * Handle create-room message
    */
-  private handleCreateRoom(ws: WebSocket): void {
-    const roomId = this.roomManager.createRoom();
+  private async handleCreateRoom(
+    ws: WebSocket,
+    message: Extract<InboundSignalingMessage, { type: "create-room" }>,
+  ): Promise<void> {
+    const options = message.options;
+    const roomId = await this.roomManager.createRoom(options);
 
-    const response: SignalingMessage = {
+    const response: OutboundSignalingMessage = {
       type: "room-created",
       roomId,
     };
@@ -140,69 +216,85 @@ export class AvesServer {
     this.sendMessage(ws, response);
 
     if (this.config.debug) {
-      console.log(`[AvesServer] Room created: ${roomId}`);
+      console.log(`[AvesServer] Room created: ${roomId}`, options);
     }
   }
 
   /**
    * Handle join-room message
    */
-  private handleJoinRoom(
+  private async handleJoinRoom(
     ws: WebSocket,
-    message: any,
-    setUserId: (userId: string) => void
-  ): void {
-    const { roomId, userId, userName } = message;
+    message: Extract<InboundSignalingMessage, { type: "join-room" }>,
+    setUserId: (userId: string) => void,
+  ): Promise<void> {
+    const { roomId, userName, password } = message;
+    let userId = message.userId;
 
-    if (!roomId || !userId || !userName) {
-      this.sendError(ws, "Missing required fields: roomId, userId, userName");
+    if (!roomId || !userName) {
+      this.sendError(ws, "Missing required fields: roomId, userName");
       return;
     }
 
-    // Check if room exists
-    if (!this.roomManager.roomExists(roomId)) {
+    if (!userId) {
+      userId = this.generateUserId();
+    }
+
+    const roomExists = await this.roomManager.roomExists(roomId);
+    if (!roomExists) {
       this.sendError(ws, `Room ${roomId} does not exist`);
       return;
     }
 
-    // Get current participants before joining
-    const currentParticipants = this.roomManager.getRoomParticipants(roomId);
+    const currentParticipants =
+      await this.roomManager.getRoomParticipants(roomId);
 
-    // Join the room
-    const success = this.roomManager.joinRoom(roomId, userId, userName, ws);
+    const success = await this.roomManager.joinRoom(
+      roomId,
+      userId,
+      userName,
+      ws,
+      password,
+    );
 
     if (!success) {
-      this.sendError(ws, `Failed to join room ${roomId}`);
+      this.sendError(
+        ws,
+        `Failed to join room ${roomId}. Check password or room capacity.`,
+      );
       return;
     }
 
-    // Store user socket mapping
-    this.userSockets.set(userId, ws);
     setUserId(userId);
 
-    // Send room-joined message to the new user
-    const joinedResponse: SignalingMessage = {
+    const joinedResponse: OutboundSignalingMessage = {
       type: "room-joined",
       participants: currentParticipants,
+      userId,
     };
     this.sendMessage(ws, joinedResponse);
 
-    // Broadcast user-joined to other participants
-    const userJoinedMessage: SignalingMessage = {
+    const userJoinedMessage: OutboundSignalingMessage = {
       type: "user-joined",
       user: { id: userId, name: userName },
     };
-    this.roomManager.broadcastToRoom(roomId, userJoinedMessage, userId);
+    await this.roomManager.broadcastToRoom(roomId, userJoinedMessage, userId);
 
     if (this.config.debug) {
       console.log(`[AvesServer] User ${userId} joined room ${roomId}`);
     }
   }
 
+  private generateUserId(): string {
+    return crypto.randomBytes(16).toString("hex");
+  }
+
   /**
    * Handle leave-room message
    */
-  private handleLeaveRoom(message: any): void {
+  private handleLeaveRoom(
+    message: Extract<InboundSignalingMessage, { type: "leave-room" }>,
+  ): void {
     const { userId } = message;
 
     if (!userId) {
@@ -217,23 +309,20 @@ export class AvesServer {
    * Handle user disconnection
    * Requirements: 10.1, 10.2
    */
-  private handleDisconnection(userId: string): void {
-    const roomId = this.roomManager.getRoomIdByUserId(userId);
+  private async handleDisconnection(userId: string): Promise<void> {
+    const roomId = await this.roomManager.getRoomIdByUserId(userId);
 
     if (!roomId) {
       return;
     }
 
-    // Remove user from room
-    this.roomManager.leaveRoom(roomId, userId);
-    this.userSockets.delete(userId);
+    await this.roomManager.leaveRoom(roomId, userId);
 
-    // Broadcast user-left to remaining participants
-    const userLeftMessage: SignalingMessage = {
+    const userLeftMessage: OutboundSignalingMessage = {
       type: "user-left",
       userId,
     };
-    this.roomManager.broadcastToRoom(roomId, userLeftMessage);
+    await this.roomManager.broadcastToRoom(roomId, userLeftMessage);
 
     if (this.config.debug) {
       console.log(`[AvesServer] User ${userId} left room ${roomId}`);
@@ -243,61 +332,56 @@ export class AvesServer {
   /**
    * Handle offer message
    */
-  private handleOffer(message: any): void {
-    const { fromId, targetId, offer } = message;
-
-    if (!fromId || !targetId || !offer) {
-      console.warn("[AvesServer] Offer message missing required fields");
-      return;
-    }
-
-    this.signalingHandler.handleOffer(fromId, targetId, offer);
+  private handleOffer(
+    message: Extract<InboundSignalingMessage, { type: "offer" }>,
+  ): void {
+    this.signalingHandler.handleOffer(
+      message.fromId,
+      message.targetId,
+      message.offer,
+    );
   }
 
   /**
    * Handle answer message
    */
-  private handleAnswer(message: any): void {
-    const { fromId, targetId, answer } = message;
-
-    if (!fromId || !targetId || !answer) {
-      console.warn("[AvesServer] Answer message missing required fields");
-      return;
-    }
-
-    this.signalingHandler.handleAnswer(fromId, targetId, answer);
+  private handleAnswer(
+    message: Extract<InboundSignalingMessage, { type: "answer" }>,
+  ): void {
+    this.signalingHandler.handleAnswer(
+      message.fromId,
+      message.targetId,
+      message.answer,
+    );
   }
 
   /**
    * Handle ice-candidate message
    */
-  private handleIceCandidate(message: any): void {
-    const { fromId, targetId, candidate } = message;
-
-    if (!fromId || !targetId || !candidate) {
-      console.warn(
-        "[AvesServer] ICE candidate message missing required fields"
-      );
-      return;
-    }
-
-    this.signalingHandler.handleIceCandidate(fromId, targetId, candidate);
+  private handleIceCandidate(
+    message: Extract<InboundSignalingMessage, { type: "ice-candidate" }>,
+  ): void {
+    this.signalingHandler.handleIceCandidate(
+      message.fromId,
+      message.targetId,
+      message.candidate,
+    );
   }
 
   /**
    * Get room information
    * Requirements: 10.3
    */
-  getRoomInfo(roomId: string): RoomInfo | null {
-    return this.roomManager.getRoomInfo(roomId);
+  async getRoomInfo(roomId: string): Promise<RoomInfo | null> {
+    return await this.roomManager.getRoomInfo(roomId);
   }
 
   /**
    * Get participant count for a room
    * Requirements: 10.4
    */
-  getParticipantCount(roomId: string): number {
-    const roomInfo = this.roomManager.getRoomInfo(roomId);
+  async getParticipantCount(roomId: string): Promise<number> {
+    const roomInfo = await this.roomManager.getRoomInfo(roomId);
     return roomInfo ? roomInfo.participantCount : 0;
   }
 
@@ -305,8 +389,16 @@ export class AvesServer {
    * Get all rooms information
    * Requirements: 10.3
    */
-  getAllRooms(): RoomInfo[] {
-    return this.roomManager.getAllRooms();
+  async getAllRooms(): Promise<RoomInfo[]> {
+    return await this.roomManager.getAllRooms();
+  }
+
+  /**
+   * Get the storage instance for adding event listeners
+   * This allows users to implement custom persistence
+   */
+  getStorage(): IDataStorage {
+    return this.storage;
   }
 
   /**
@@ -317,14 +409,10 @@ export class AvesServer {
       console.log("[AvesServer] Closing server");
     }
 
-    // Close all WebSocket connections
-    this.userSockets.forEach((ws) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.close();
-      }
-    });
-
-    this.userSockets.clear();
+    for (const ws of this.connections) {
+      ws.close();
+    }
+    this.connections.clear();
 
     if (this.config.debug) {
       console.log("[AvesServer] Server closed");
@@ -334,7 +422,7 @@ export class AvesServer {
   /**
    * Send a message to a WebSocket connection
    */
-  private sendMessage(ws: WebSocket, message: SignalingMessage): void {
+  private sendMessage(ws: WebSocket, message: OutboundSignalingMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
       try {
         ws.send(JSON.stringify(message));
@@ -348,7 +436,7 @@ export class AvesServer {
    * Send an error message to a WebSocket connection
    */
   private sendError(ws: WebSocket, errorMessage: string): void {
-    const message: SignalingMessage = {
+    const message: OutboundSignalingMessage = {
       type: "error",
       message: errorMessage,
     };

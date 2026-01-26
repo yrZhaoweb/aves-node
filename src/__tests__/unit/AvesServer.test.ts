@@ -1,21 +1,6 @@
 import { AvesServer } from "../../core/AvesServer";
 import { WebSocket } from "ws";
-import { EventEmitter } from "events";
-
-// Mock WebSocket that extends EventEmitter
-class MockWebSocket extends EventEmitter {
-  readyState: number = 1; // WebSocket.OPEN = 1, WebSocket.CLOSED = 3
-  sentMessages: string[] = [];
-
-  send(data: string): void {
-    this.sentMessages.push(data);
-  }
-
-  close(): void {
-    this.readyState = 3; // WebSocket.CLOSED
-    this.emit("close");
-  }
-}
+import { MockWebSocket, createMockWebSocket } from "../utils/MockWebSocket";
 
 describe("AvesServer", () => {
   let server: AvesServer;
@@ -28,13 +13,18 @@ describe("AvesServer", () => {
     server.close();
   });
 
+  // Helper to wait for async message processing
+  const waitForMessages = () => new Promise((resolve) => setImmediate(resolve));
+
   describe("Room Operations", () => {
-    it("should handle create-room message", () => {
+    it("should handle create-room message", async () => {
       const ws = new MockWebSocket() as unknown as WebSocket;
       server.handleConnection(ws);
 
       const createRoomMsg = { type: "create-room" };
       (ws as any).emit("message", Buffer.from(JSON.stringify(createRoomMsg)));
+
+      await waitForMessages();
 
       expect((ws as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws as any).sentMessages[0]);
@@ -42,7 +32,7 @@ describe("AvesServer", () => {
       expect(response.roomId).toBeDefined();
     });
 
-    it("should handle join-room message", () => {
+    it("should handle join-room message", async () => {
       const ws1 = new MockWebSocket() as unknown as WebSocket;
       const ws2 = new MockWebSocket() as unknown as WebSocket;
 
@@ -52,6 +42,7 @@ describe("AvesServer", () => {
       // Create room
       const createMsg = { type: "create-room" };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
 
       const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
 
@@ -63,13 +54,14 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws2 as any).emit("message", Buffer.from(JSON.stringify(joinMsg)));
+      await waitForMessages();
 
       expect((ws2 as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws2 as any).sentMessages[0]);
       expect(response.type).toBe("room-joined");
     });
 
-    it("should broadcast user-joined to other participants", () => {
+    it("should broadcast user-joined to other participants", async () => {
       const ws1 = new MockWebSocket() as unknown as WebSocket;
       const ws2 = new MockWebSocket() as unknown as WebSocket;
 
@@ -79,6 +71,7 @@ describe("AvesServer", () => {
       // Create and join room with first user
       const createMsg = { type: "create-room" };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
       const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
 
       const joinMsg1 = {
@@ -88,6 +81,7 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(joinMsg1)));
+      await waitForMessages();
 
       // Clear messages
       (ws1 as any).sentMessages = [];
@@ -100,6 +94,7 @@ describe("AvesServer", () => {
         userName: "Bob",
       };
       (ws2 as any).emit("message", Buffer.from(JSON.stringify(joinMsg2)));
+      await waitForMessages();
 
       // First user should receive user-joined broadcast
       expect((ws1 as any).sentMessages).toHaveLength(1);
@@ -108,7 +103,7 @@ describe("AvesServer", () => {
       expect(broadcast.user.id).toBe("user2");
     });
 
-    it("should handle join-room with non-existent room", () => {
+    it("should handle join-room with non-existent room", async () => {
       const ws = new MockWebSocket() as unknown as WebSocket;
       server.handleConnection(ws);
 
@@ -119,6 +114,7 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws as any).emit("message", Buffer.from(JSON.stringify(joinMsg)));
+      await waitForMessages();
 
       expect((ws as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws as any).sentMessages[0]);
@@ -127,7 +123,7 @@ describe("AvesServer", () => {
   });
 
   describe("Connection Lifecycle", () => {
-    it("should handle connection close and broadcast user-left", () => {
+    it("should handle connection close and broadcast user-left", async () => {
       const ws1 = new MockWebSocket() as unknown as WebSocket;
       const ws2 = new MockWebSocket() as unknown as WebSocket;
 
@@ -137,6 +133,7 @@ describe("AvesServer", () => {
       // Create room and join with both users
       const createMsg = { type: "create-room" };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
       const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
 
       const joinMsg1 = {
@@ -146,6 +143,7 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(joinMsg1)));
+      await waitForMessages();
 
       const joinMsg2 = {
         type: "join-room",
@@ -154,12 +152,14 @@ describe("AvesServer", () => {
         userName: "Bob",
       };
       (ws2 as any).emit("message", Buffer.from(JSON.stringify(joinMsg2)));
+      await waitForMessages();
 
       // Clear messages
       (ws2 as any).sentMessages = [];
 
       // Close first connection
       (ws1 as any).emit("close");
+      await waitForMessages();
 
       // Second user should receive user-left
       expect((ws2 as any).sentMessages).toHaveLength(1);
@@ -170,7 +170,7 @@ describe("AvesServer", () => {
   });
 
   describe("Signaling Messages", () => {
-    it("should handle offer message", () => {
+    it("should handle offer message", async () => {
       const ws1 = new MockWebSocket() as unknown as WebSocket;
       const ws2 = new MockWebSocket() as unknown as WebSocket;
 
@@ -180,6 +180,7 @@ describe("AvesServer", () => {
       // Setup room with two users
       const createMsg = { type: "create-room" };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
       const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
 
       const joinMsg1 = {
@@ -189,6 +190,7 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(joinMsg1)));
+      await waitForMessages();
 
       const joinMsg2 = {
         type: "join-room",
@@ -197,6 +199,7 @@ describe("AvesServer", () => {
         userName: "Bob",
       };
       (ws2 as any).emit("message", Buffer.from(JSON.stringify(joinMsg2)));
+      await waitForMessages();
 
       // Clear messages
       (ws2 as any).sentMessages = [];
@@ -209,6 +212,7 @@ describe("AvesServer", () => {
         offer: { type: "offer", sdp: "test-sdp" },
       };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(offerMsg)));
+      await waitForMessages();
 
       // User2 should receive the offer
       expect((ws2 as any).sentMessages).toHaveLength(1);
@@ -216,7 +220,7 @@ describe("AvesServer", () => {
       expect(received.type).toBe("offer");
     });
 
-    it("should handle answer message", () => {
+    it("should handle answer message", async () => {
       const ws1 = new MockWebSocket() as unknown as WebSocket;
       const ws2 = new MockWebSocket() as unknown as WebSocket;
 
@@ -226,6 +230,7 @@ describe("AvesServer", () => {
       // Setup room
       const createMsg = { type: "create-room" };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
       const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
 
       const joinMsg1 = {
@@ -235,6 +240,7 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(joinMsg1)));
+      await waitForMessages();
 
       const joinMsg2 = {
         type: "join-room",
@@ -243,6 +249,7 @@ describe("AvesServer", () => {
         userName: "Bob",
       };
       (ws2 as any).emit("message", Buffer.from(JSON.stringify(joinMsg2)));
+      await waitForMessages();
 
       // Clear messages
       (ws1 as any).sentMessages = [];
@@ -255,6 +262,7 @@ describe("AvesServer", () => {
         answer: { type: "answer", sdp: "test-sdp" },
       };
       (ws2 as any).emit("message", Buffer.from(JSON.stringify(answerMsg)));
+      await waitForMessages();
 
       // User1 should receive the answer
       expect((ws1 as any).sentMessages).toHaveLength(1);
@@ -262,7 +270,7 @@ describe("AvesServer", () => {
       expect(received.type).toBe("answer");
     });
 
-    it("should handle ice-candidate message", () => {
+    it("should handle ice-candidate message", async () => {
       const ws1 = new MockWebSocket() as unknown as WebSocket;
       const ws2 = new MockWebSocket() as unknown as WebSocket;
 
@@ -272,6 +280,7 @@ describe("AvesServer", () => {
       // Setup room
       const createMsg = { type: "create-room" };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
       const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
 
       const joinMsg1 = {
@@ -281,6 +290,7 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(joinMsg1)));
+      await waitForMessages();
 
       const joinMsg2 = {
         type: "join-room",
@@ -289,6 +299,7 @@ describe("AvesServer", () => {
         userName: "Bob",
       };
       (ws2 as any).emit("message", Buffer.from(JSON.stringify(joinMsg2)));
+      await waitForMessages();
 
       // Clear messages
       (ws2 as any).sentMessages = [];
@@ -301,6 +312,7 @@ describe("AvesServer", () => {
         candidate: { candidate: "test-candidate" },
       };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(candidateMsg)));
+      await waitForMessages();
 
       // User2 should receive the candidate
       expect((ws2 as any).sentMessages).toHaveLength(1);
@@ -310,25 +322,27 @@ describe("AvesServer", () => {
   });
 
   describe("Query Methods", () => {
-    it("should return room info", () => {
+    it("should return room info", async () => {
       const ws = new MockWebSocket() as unknown as WebSocket;
       server.handleConnection(ws);
 
       const createMsg = { type: "create-room" };
       (ws as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
       const roomId = JSON.parse((ws as any).sentMessages[0]).roomId;
 
-      const roomInfo = server.getRoomInfo(roomId);
+      const roomInfo = await server.getRoomInfo(roomId);
       expect(roomInfo).not.toBeNull();
       expect(roomInfo?.id).toBe(roomId);
     });
 
-    it("should return participant count", () => {
+    it("should return participant count", async () => {
       const ws = new MockWebSocket() as unknown as WebSocket;
       server.handleConnection(ws);
 
       const createMsg = { type: "create-room" };
       (ws as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
       const roomId = JSON.parse((ws as any).sentMessages[0]).roomId;
 
       const joinMsg = {
@@ -338,22 +352,25 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws as any).emit("message", Buffer.from(JSON.stringify(joinMsg)));
+      await waitForMessages();
 
-      const count = server.getParticipantCount(roomId);
+      const count = await server.getParticipantCount(roomId);
       expect(count).toBe(1);
     });
 
-    it("should return all rooms", () => {
+    it("should return all rooms", async () => {
       const ws = new MockWebSocket() as unknown as WebSocket;
       server.handleConnection(ws);
 
       const createMsg1 = { type: "create-room" };
       (ws as any).emit("message", Buffer.from(JSON.stringify(createMsg1)));
+      await waitForMessages();
 
       const createMsg2 = { type: "create-room" };
       (ws as any).emit("message", Buffer.from(JSON.stringify(createMsg2)));
+      await waitForMessages();
 
-      const allRooms = server.getAllRooms();
+      const allRooms = await server.getAllRooms();
       expect(allRooms).toHaveLength(2);
     });
   });
@@ -396,25 +413,27 @@ describe("AvesServer", () => {
       expect(response.type).toBe("error");
     });
 
-    it("should handle join-room with missing fields", () => {
+    it("should handle join-room with missing fields", async () => {
       const ws = new MockWebSocket() as unknown as WebSocket;
       server.handleConnection(ws);
 
       const invalidJoin = { type: "join-room", roomId: "test" };
       (ws as any).emit("message", Buffer.from(JSON.stringify(invalidJoin)));
+      await waitForMessages();
 
       expect((ws as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws as any).sentMessages[0]);
       expect(response.type).toBe("error");
     });
 
-    it("should handle leave-room message", () => {
+    it("should handle leave-room message", async () => {
       const ws = new MockWebSocket() as unknown as WebSocket;
       server.handleConnection(ws);
 
       // Create and join room
       const createMsg = { type: "create-room" };
       (ws as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
       const roomId = JSON.parse((ws as any).sentMessages[0]).roomId;
 
       const joinMsg = {
@@ -424,12 +443,14 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws as any).emit("message", Buffer.from(JSON.stringify(joinMsg)));
+      await waitForMessages();
 
       // Leave room
       const leaveMsg = { type: "leave-room", userId: "user1" };
       (ws as any).emit("message", Buffer.from(JSON.stringify(leaveMsg)));
+      await waitForMessages();
 
-      expect(server.getRoomInfo(roomId)).toBeNull();
+      expect(await server.getRoomInfo(roomId)).toBeNull();
     });
 
     it("should handle leave-room without userId", () => {
@@ -470,7 +491,7 @@ describe("AvesServer", () => {
       expect(() => {
         (ws as any).emit(
           "message",
-          Buffer.from(JSON.stringify(invalidCandidate))
+          Buffer.from(JSON.stringify(invalidCandidate)),
         );
       }).not.toThrow();
     });
@@ -495,7 +516,7 @@ describe("AvesServer", () => {
   });
 
   describe("Server Configuration", () => {
-    it("should work with debug enabled", () => {
+    it("should work with debug enabled", async () => {
       const debugServer = new AvesServer({ debug: true });
       const ws = new MockWebSocket() as unknown as WebSocket;
 
@@ -503,12 +524,13 @@ describe("AvesServer", () => {
 
       const createMsg = { type: "create-room" };
       (ws as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
 
       expect((ws as any).sentMessages).toHaveLength(1);
       debugServer.close();
     });
 
-    it("should close all connections on server close", () => {
+    it("should close all connections on server close", async () => {
       const ws1 = new MockWebSocket() as unknown as WebSocket;
       const ws2 = new MockWebSocket() as unknown as WebSocket;
 
@@ -518,6 +540,7 @@ describe("AvesServer", () => {
       // Create and join rooms
       const createMsg = { type: "create-room" };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
       const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
 
       const joinMsg = {
@@ -527,6 +550,7 @@ describe("AvesServer", () => {
         userName: "Alice",
       };
       (ws1 as any).emit("message", Buffer.from(JSON.stringify(joinMsg)));
+      await waitForMessages();
 
       server.close();
 

@@ -1,46 +1,63 @@
 import { WebSocket } from "ws";
+import * as crypto from "crypto";
 import {
   Room,
   ParticipantInfo,
   Participant,
   RoomInfo,
   SignalingMessage,
+  CreateRoomOptions,
 } from "../types/types";
+import { IDataStorage } from "../storage/IDataStorage";
 
 /**
  * RoomManager handles room lifecycle and participant management
  */
 export class RoomManager {
-  private rooms: Map<string, Room> = new Map();
-  private userToRoom: Map<string, string> = new Map();
-  private roomIdCounter: number = 0;
+  private storage: IDataStorage;
+
+  constructor(storage: IDataStorage) {
+    this.storage = storage;
+  }
 
   /**
    * Create a new room and return its unique ID
    */
-  createRoom(): string {
+  async createRoom(options?: CreateRoomOptions): Promise<string> {
     const roomId = this.generateRoomId();
     const room: Room = {
       id: roomId,
+      name: options?.name,
+      maxCapacity: options?.maxCapacity,
+      password: options?.password,
       participants: new Map(),
       createdAt: Date.now(),
     };
-    this.rooms.set(roomId, room);
+    await this.storage.setRoom(roomId, room);
     return roomId;
   }
 
   /**
    * Add a user to a room
-   * @returns true if successful, false if room doesn't exist
+   * @returns true if successful, false if room doesn't exist or validation fails
    */
-  joinRoom(
+  async joinRoom(
     roomId: string,
     userId: string,
     userName: string,
-    socket: WebSocket
-  ): boolean {
-    const room = this.rooms.get(roomId);
+    socket: WebSocket,
+    password?: string,
+  ): Promise<boolean> {
+    const room = await this.storage.getRoom(roomId);
     if (!room) {
+      return false;
+    }
+
+    if (room.password && room.password !== password) {
+      return false;
+    }
+
+    if (room.maxCapacity && room.participants.size >= room.maxCapacity) {
       return false;
     }
 
@@ -50,8 +67,8 @@ export class RoomManager {
       socket,
     };
 
-    room.participants.set(userId, participantInfo);
-    this.userToRoom.set(userId, roomId);
+    await this.storage.setParticipant(roomId, userId, participantInfo);
+    await this.storage.setUserRoom(userId, roomId);
 
     return true;
   }
@@ -60,31 +77,27 @@ export class RoomManager {
    * Remove a user from a room
    * Automatically deletes the room if it becomes empty
    */
-  leaveRoom(roomId: string, userId: string): void {
-    const room = this.rooms.get(roomId);
+  async leaveRoom(roomId: string, userId: string): Promise<void> {
+    const room = await this.storage.getRoom(roomId);
     if (!room) {
       return;
     }
 
-    room.participants.delete(userId);
-    this.userToRoom.delete(userId);
+    await this.storage.deleteParticipant(roomId, userId);
+    await this.storage.deleteUserRoom(userId);
 
-    // Auto-cleanup empty rooms
-    if (room.participants.size === 0) {
-      this.rooms.delete(roomId);
+    const participants = await this.storage.getAllParticipants(roomId);
+    if (participants.size === 0) {
+      await this.storage.deleteRoom(roomId);
     }
   }
 
   /**
    * Get the list of participants in a room
    */
-  getRoomParticipants(roomId: string): Participant[] {
-    const room = this.rooms.get(roomId);
-    if (!room) {
-      return [];
-    }
-
-    return Array.from(room.participants.values()).map((p) => ({
+  async getRoomParticipants(roomId: string): Promise<Participant[]> {
+    const participants = await this.storage.getAllParticipants(roomId);
+    return Array.from(participants.values()).map((p) => ({
       id: p.userId,
       name: p.userName,
     }));
@@ -93,27 +106,23 @@ export class RoomManager {
   /**
    * Check if a room exists
    */
-  roomExists(roomId: string): boolean {
-    return this.rooms.has(roomId);
+  async roomExists(roomId: string): Promise<boolean> {
+    return await this.storage.roomExists(roomId);
   }
 
   /**
    * Broadcast a message to all participants in a room
    * @param excludeUserId Optional user ID to exclude from broadcast
    */
-  broadcastToRoom(
+  async broadcastToRoom(
     roomId: string,
     message: SignalingMessage,
-    excludeUserId?: string
-  ): void {
-    const room = this.rooms.get(roomId);
-    if (!room) {
-      return;
-    }
-
+    excludeUserId?: string,
+  ): Promise<void> {
+    const participants = await this.storage.getAllParticipants(roomId);
     const messageStr = JSON.stringify(message);
 
-    room.participants.forEach((participant, userId) => {
+    participants.forEach((participant, userId) => {
       if (excludeUserId && userId === excludeUserId) {
         return;
       }
@@ -131,19 +140,14 @@ export class RoomManager {
   /**
    * Send a message to a specific user
    */
-  sendToUser(userId: string, message: SignalingMessage): void {
-    const roomId = this.userToRoom.get(userId);
+  async sendToUser(userId: string, message: SignalingMessage): Promise<void> {
+    const roomId = await this.storage.getUserRoom(userId);
     if (!roomId) {
       console.warn(`User ${userId} not found in any room`);
       return;
     }
 
-    const room = this.rooms.get(roomId);
-    if (!room) {
-      return;
-    }
-
-    const participant = room.participants.get(userId);
+    const participant = await this.storage.getParticipant(roomId, userId);
     if (!participant) {
       return;
     }
@@ -160,42 +164,44 @@ export class RoomManager {
   /**
    * Get the room ID for a given user
    */
-  getRoomIdByUserId(userId: string): string | undefined {
-    return this.userToRoom.get(userId);
+  async getRoomIdByUserId(userId: string): Promise<string | null> {
+    return await this.storage.getUserRoom(userId);
   }
 
   /**
    * Get room information
    */
-  getRoomInfo(roomId: string): RoomInfo | null {
-    const room = this.rooms.get(roomId);
-    if (!room) {
-      return null;
-    }
+  async getRoomInfo(roomId: string): Promise<RoomInfo | null> {
+    const room = await this.storage.getRoom(roomId);
+    return room ? this.toRoomInfo(room) : null;
+  }
 
+  /**
+   * Get all rooms information
+   */
+  async getAllRooms(): Promise<RoomInfo[]> {
+    const rooms = await this.storage.getAllRooms();
+    return rooms.map((room) => this.toRoomInfo(room));
+  }
+
+  /**
+   * Convert Room to RoomInfo (public-facing data without password)
+   */
+  private toRoomInfo(room: Room): RoomInfo {
     return {
       id: room.id,
+      name: room.name,
+      maxCapacity: room.maxCapacity,
+      hasPassword: !!room.password,
       participantCount: room.participants.size,
       createdAt: room.createdAt,
     };
   }
 
   /**
-   * Get all rooms information
-   */
-  getAllRooms(): RoomInfo[] {
-    return Array.from(this.rooms.values()).map((room) => ({
-      id: room.id,
-      participantCount: room.participants.size,
-      createdAt: room.createdAt,
-    }));
-  }
-
-  /**
-   * Generate a unique room ID
+   * Generate a unique room ID using cryptographically secure random bytes
    */
   private generateRoomId(): string {
-    this.roomIdCounter++;
-    return `room-${Date.now()}-${this.roomIdCounter}`;
+    return `room-${crypto.randomBytes(8).toString("hex")}`;
   }
 }

@@ -20,169 +20,135 @@ export class SignalingHandler {
    * Handle and forward an offer message to the target peer
    * Requirements: 9.1, 9.4
    */
-  handleOffer(
+  async handleOffer(
     fromId: string,
     targetId: string,
-    offer: RTCSessionDescriptionInit
-  ): void {
-    // Validate the offer message
+    offer: RTCSessionDescriptionInit,
+  ): Promise<void> {
     if (!this.validateOffer(offer)) {
       console.warn(`Invalid offer from ${fromId} to ${targetId}`);
       return;
     }
-
-    // Check if target exists
-    const targetRoomId = this.roomManager.getRoomIdByUserId(targetId);
-    if (!targetRoomId) {
-      console.warn(`Target user ${targetId} not found in any room`);
-      return;
-    }
-
-    // Forward the offer to the target
-    const message: SignalingMessage = {
+    await this.forwardMessage(targetId, {
       type: "offer",
       fromId,
       targetId,
       offer,
-    };
-
-    this.roomManager.sendToUser(targetId, message);
+    });
   }
 
   /**
    * Handle and forward an answer message to the target peer
    * Requirements: 9.2, 9.4
    */
-  handleAnswer(
+  async handleAnswer(
     fromId: string,
     targetId: string,
-    answer: RTCSessionDescriptionInit
-  ): void {
-    // Validate the answer message
+    answer: RTCSessionDescriptionInit,
+  ): Promise<void> {
     if (!this.validateAnswer(answer)) {
       console.warn(`Invalid answer from ${fromId} to ${targetId}`);
       return;
     }
-
-    // Check if target exists
-    const targetRoomId = this.roomManager.getRoomIdByUserId(targetId);
-    if (!targetRoomId) {
-      console.warn(`Target user ${targetId} not found in any room`);
-      return;
-    }
-
-    // Forward the answer to the target
-    const message: SignalingMessage = {
+    await this.forwardMessage(targetId, {
       type: "answer",
       fromId,
       targetId,
       answer,
-    };
-
-    this.roomManager.sendToUser(targetId, message);
+    });
   }
 
   /**
    * Handle and forward an ICE candidate to the target peer
    * Requirements: 9.3, 9.4
    */
-  handleIceCandidate(
+  async handleIceCandidate(
     fromId: string,
     targetId: string,
-    candidate: RTCIceCandidateInit
-  ): void {
-    // Validate the ICE candidate
+    candidate: RTCIceCandidateInit,
+  ): Promise<void> {
     if (!this.validateIceCandidate(candidate)) {
       console.warn(`Invalid ICE candidate from ${fromId} to ${targetId}`);
       return;
     }
-
-    // Check if target exists
-    const targetRoomId = this.roomManager.getRoomIdByUserId(targetId);
-    if (!targetRoomId) {
-      console.warn(`Target user ${targetId} not found in any room`);
-      return;
-    }
-
-    // Forward the ICE candidate to the target
-    const message: SignalingMessage = {
+    await this.forwardMessage(targetId, {
       type: "ice-candidate",
       fromId,
       targetId,
       candidate,
-    };
+    });
+  }
 
-    this.roomManager.sendToUser(targetId, message);
+  /**
+   * Common logic to forward a signaling message to target user
+   */
+  private async forwardMessage(
+    targetId: string,
+    message: SignalingMessage,
+  ): Promise<void> {
+    await this.roomManager.sendToUser(targetId, message);
   }
 
   /**
    * Validate a signaling message has all required fields
    * Requirements: 9.6
    */
-  validateSignalingMessage(message: any): boolean {
+  validateSignalingMessage(message: unknown): boolean {
     if (!message || typeof message !== "object") {
       return false;
     }
 
-    const type = message.type;
+    const msg = message as Record<string, unknown>;
+    if (!this.validatePeerIds(msg.fromId, msg.targetId)) {
+      return false;
+    }
 
-    switch (type) {
+    switch (msg.type) {
       case "offer":
-        return !!(
-          typeof message.fromId === "string" &&
-          message.fromId.trim().length > 0 &&
-          typeof message.targetId === "string" &&
-          message.targetId.trim().length > 0 &&
-          this.validateOffer(message.offer)
-        );
-
+        return this.validateOffer(msg.offer);
       case "answer":
-        return !!(
-          typeof message.fromId === "string" &&
-          message.fromId.trim().length > 0 &&
-          typeof message.targetId === "string" &&
-          message.targetId.trim().length > 0 &&
-          this.validateAnswer(message.answer)
-        );
-
+        return this.validateAnswer(msg.answer);
       case "ice-candidate":
-        return !!(
-          typeof message.fromId === "string" &&
-          message.fromId.trim().length > 0 &&
-          typeof message.targetId === "string" &&
-          message.targetId.trim().length > 0 &&
-          this.validateIceCandidate(message.candidate)
-        );
-
+        return this.validateIceCandidate(msg.candidate);
       default:
         return false;
     }
   }
 
   /**
-   * Validate an offer has required fields
+   * Validate peer IDs are non-empty strings
    */
-  private validateOffer(offer: any): boolean {
-    return !!(
-      offer &&
-      typeof offer === "object" &&
-      offer.type === "offer" &&
-      typeof offer.sdp === "string" &&
-      offer.sdp.length > 0
+  private validatePeerIds(fromId: unknown, targetId: unknown): boolean {
+    return (
+      typeof fromId === "string" &&
+      fromId.trim().length > 0 &&
+      typeof targetId === "string" &&
+      targetId.trim().length > 0
     );
   }
 
   /**
-   * Validate an answer has required fields
+   * Validate a session description (offer or answer) has required fields
    */
-  private validateAnswer(answer: any): boolean {
+  private validateSessionDescription(
+    description: any,
+    expectedType: "offer" | "answer",
+  ): boolean {
     return !!(
-      answer &&
-      typeof answer === "object" &&
-      answer.type === "answer" &&
-      typeof answer.sdp === "string" &&
-      answer.sdp.length > 0
+      description &&
+      typeof description === "object" &&
+      description.type === expectedType &&
+      typeof description.sdp === "string" &&
+      description.sdp.length > 0
     );
+  }
+
+  private validateOffer(offer: any): boolean {
+    return this.validateSessionDescription(offer, "offer");
+  }
+
+  private validateAnswer(answer: any): boolean {
+    return this.validateSessionDescription(answer, "answer");
   }
 
   /**
