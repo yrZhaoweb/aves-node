@@ -49,6 +49,9 @@ export type {
   InboundSignalingMessage,
   OutboundSignalingMessage,
   SignalingMessage,
+  SignalingErrorCode,
+  SignalingErrorStage,
+  SignalingErrorPayload,
   RTCSessionDescriptionInit,
   RTCIceCandidateInit,
 } from "./types/types";

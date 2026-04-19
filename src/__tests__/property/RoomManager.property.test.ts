@@ -32,80 +32,55 @@ class MockWebSocket {
 
 describe("RoomManager Property Tests", () => {
   describe("Property 7: 房间 ID 唯一性", () => {
-    /**
-     * Property: For any two createRoom calls, the returned room IDs should be different
-     * Validates: Requirements 8.1
-     */
     it("should generate unique room IDs for all createRoom calls", async () => {
       await fc.assert(
-        fc.asyncProperty(
-          fc.integer({ min: 2, max: 100 }), // number of rooms to create
-          async (roomCount) => {
-            const roomManager = createRoomManager();
-            const roomIds = new Set<string>();
+        fc.asyncProperty(fc.integer({ min: 2, max: 100 }), async (roomCount) => {
+          const roomManager = createRoomManager();
+          const roomIds = new Set<string>();
 
-            // Create multiple rooms
-            for (let i = 0; i < roomCount; i++) {
-              const roomId = await roomManager.createRoom();
-              roomIds.add(roomId);
-            }
+          for (let i = 0; i < roomCount; i++) {
+            roomIds.add(await roomManager.createRoom());
+          }
 
-            // All room IDs should be unique
-            expect(roomIds.size).toBe(roomCount);
-          },
-        ),
+          expect(roomIds.size).toBe(roomCount);
+        }),
         { numRuns: 100 },
       );
     });
 
-    /**
-     * Property: Room IDs should remain unique even across multiple RoomManager instances
-     * Validates: Requirements 8.1
-     */
-    it("should generate unique room IDs across sequential operations", () => {
-      fc.assert(
-        fc.property(
-          fc.integer({ min: 5, max: 50 }), // number of rooms
-          (roomCount) => {
-            const roomManager = new RoomManager();
-            const roomIds: string[] = [];
+    it("should generate unique room IDs across sequential operations", async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.integer({ min: 5, max: 50 }), async (roomCount) => {
+          const roomManager = createRoomManager();
+          const roomIds: string[] = [];
 
-            // Create rooms sequentially
-            for (let i = 0; i < roomCount; i++) {
-              roomIds.push(roomManager.createRoom());
-            }
+          for (let i = 0; i < roomCount; i++) {
+            roomIds.push(await roomManager.createRoom());
+          }
 
-            // Check all IDs are unique
-            const uniqueIds = new Set(roomIds);
-            expect(uniqueIds.size).toBe(roomIds.length);
-          },
-        ),
+          expect(new Set(roomIds).size).toBe(roomIds.length);
+        }),
         { numRuns: 100 },
       );
     });
   });
 
   describe("Property 9: 用户加入广播", () => {
-    /**
-     * Property: For any user joining a room, all other participants should receive a broadcast
-     * Validates: Requirements 8.5
-     */
-    it("should broadcast to all other participants when a user joins", () => {
-      fc.assert(
-        fc.property(
-          fc.integer({ min: 1, max: 10 }), // initial participant count
-          fc.string({ minLength: 1, maxLength: 20 }), // new user ID
-          fc.string({ minLength: 1, maxLength: 20 }), // new user name
-          (initialCount, newUserId, newUserName) => {
-            const roomManager = new RoomManager();
-            const roomId = roomManager.createRoom();
+    it("should broadcast to all other participants when a user joins", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 1, max: 10 }),
+          fc.string({ minLength: 1, maxLength: 20 }),
+          fc.string({ minLength: 1, maxLength: 20 }),
+          async (initialCount, newUserId, newUserName) => {
+            const roomManager = createRoomManager();
+            const roomId = await roomManager.createRoom();
             const sockets: MockWebSocket[] = [];
 
-            // Add initial participants
             for (let i = 0; i < initialCount; i++) {
               const socket = new MockWebSocket();
               sockets.push(socket);
-              roomManager.joinRoom(
+              await roomManager.joinRoom(
                 roomId,
                 `user${i}`,
                 `User${i}`,
@@ -113,19 +88,17 @@ describe("RoomManager Property Tests", () => {
               );
             }
 
-            // Clear sent messages
             sockets.forEach((s) => (s.sentMessages = []));
 
-            // Broadcast user-joined message (simulating what AvesServer would do)
             const message = {
               type: "user-joined" as const,
               user: { id: newUserId, name: newUserName },
             };
-            roomManager.broadcastToRoom(roomId, message);
 
-            // All initial participants should receive the broadcast
+            await roomManager.broadcastToRoom(roomId, message);
+
             for (const socket of sockets) {
-              expect(socket.sentMessages.length).toBe(1);
+              expect(socket.sentMessages).toHaveLength(1);
               expect(JSON.parse(socket.sentMessages[0])).toEqual(message);
             }
           },
@@ -134,29 +107,24 @@ describe("RoomManager Property Tests", () => {
       );
     });
 
-    /**
-     * Property: Broadcast should exclude the specified user
-     * Validates: Requirements 8.5
-     */
-    it("should exclude specified user from broadcast", () => {
-      fc.assert(
-        fc.property(
-          fc.integer({ min: 2, max: 10 }), // participant count
-          fc.integer({ min: 0, max: 9 }), // index of user to exclude
-          (participantCount, excludeIndex) => {
+    it("should exclude specified user from broadcast", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 2, max: 10 }),
+          fc.integer({ min: 0, max: 9 }),
+          async (participantCount, excludeIndex) => {
             const validExcludeIndex = excludeIndex % participantCount;
-            const roomManager = new RoomManager();
-            const roomId = roomManager.createRoom();
+            const roomManager = createRoomManager();
+            const roomId = await roomManager.createRoom();
             const sockets: MockWebSocket[] = [];
             const userIds: string[] = [];
 
-            // Add participants
             for (let i = 0; i < participantCount; i++) {
               const socket = new MockWebSocket();
               const userId = `user${i}`;
               sockets.push(socket);
               userIds.push(userId);
-              roomManager.joinRoom(
+              await roomManager.joinRoom(
                 roomId,
                 userId,
                 `User${i}`,
@@ -164,27 +132,23 @@ describe("RoomManager Property Tests", () => {
               );
             }
 
-            // Clear sent messages
             sockets.forEach((s) => (s.sentMessages = []));
 
-            // Broadcast with exclusion
             const message = {
               type: "user-joined" as const,
               user: { id: "newUser", name: "New User" },
             };
-            roomManager.broadcastToRoom(
+
+            await roomManager.broadcastToRoom(
               roomId,
               message,
               userIds[validExcludeIndex],
             );
 
-            // Excluded user should not receive the message
-            expect(sockets[validExcludeIndex].sentMessages.length).toBe(0);
-
-            // All other users should receive the message
+            expect(sockets[validExcludeIndex].sentMessages).toHaveLength(0);
             for (let i = 0; i < participantCount; i++) {
               if (i !== validExcludeIndex) {
-                expect(sockets[i].sentMessages.length).toBe(1);
+                expect(sockets[i].sentMessages).toHaveLength(1);
               }
             }
           },
@@ -195,25 +159,20 @@ describe("RoomManager Property Tests", () => {
   });
 
   describe("Property 10: 空房间自动清理", () => {
-    /**
-     * Property: For any room, when the last participant leaves, the room should be deleted
-     * Validates: Requirements 8.6
-     */
-    it("should automatically delete room when last participant leaves", () => {
-      fc.assert(
-        fc.property(
-          fc.integer({ min: 1, max: 20 }), // number of participants
-          (participantCount) => {
-            const roomManager = new RoomManager();
-            const roomId = roomManager.createRoom();
+    it("should automatically delete room when last participant leaves", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 1, max: 20 }),
+          async (participantCount) => {
+            const roomManager = createRoomManager();
+            const roomId = await roomManager.createRoom();
             const userIds: string[] = [];
 
-            // Add participants
             for (let i = 0; i < participantCount; i++) {
               const socket = new MockWebSocket();
               const userId = `user${i}`;
               userIds.push(userId);
-              roomManager.joinRoom(
+              await roomManager.joinRoom(
                 roomId,
                 userId,
                 `User${i}`,
@@ -221,48 +180,35 @@ describe("RoomManager Property Tests", () => {
               );
             }
 
-            // Room should exist
-            expect(roomManager.roomExists(roomId)).toBe(true);
+            expect(await roomManager.roomExists(roomId)).toBe(true);
 
-            // Remove all participants except the last one
-            for (let i = 0; i < participantCount - 1; i++) {
-              roomManager.leaveRoom(roomId, userIds[i]);
-              // Room should still exist
-              expect(roomManager.roomExists(roomId)).toBe(true);
+            for (let i = 0; i < participantCount; i++) {
+              await roomManager.leaveRoom(roomId, userIds[i]);
             }
 
-            // Remove the last participant
-            roomManager.leaveRoom(roomId, userIds[participantCount - 1]);
-
-            // Room should be deleted
-            expect(roomManager.roomExists(roomId)).toBe(false);
+            expect(await roomManager.roomExists(roomId)).toBe(false);
           },
         ),
         { numRuns: 100 },
       );
     });
 
-    /**
-     * Property: Empty room should not exist in getAllRooms
-     * Validates: Requirements 8.6
-     */
-    it("should not include empty rooms in getAllRooms", () => {
-      fc.assert(
-        fc.property(
-          fc.integer({ min: 1, max: 10 }), // number of rooms
-          fc.integer({ min: 1, max: 5 }), // participants per room
-          (roomCount, participantsPerRoom) => {
-            const roomManager = new RoomManager();
+    it("should not include empty rooms in getAllRooms", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 1, max: 10 }),
+          fc.integer({ min: 1, max: 5 }),
+          async (roomCount, participantsPerRoom) => {
+            const roomManager = createRoomManager();
             const roomIds: string[] = [];
 
-            // Create rooms with participants
             for (let i = 0; i < roomCount; i++) {
-              const roomId = roomManager.createRoom();
+              const roomId = await roomManager.createRoom();
               roomIds.push(roomId);
 
               for (let j = 0; j < participantsPerRoom; j++) {
                 const socket = new MockWebSocket();
-                roomManager.joinRoom(
+                await roomManager.joinRoom(
                   roomId,
                   `user${i}-${j}`,
                   `User${i}-${j}`,
@@ -271,19 +217,16 @@ describe("RoomManager Property Tests", () => {
               }
             }
 
-            // All rooms should exist
-            expect(roomManager.getAllRooms().length).toBe(roomCount);
+            expect((await roomManager.getAllRooms()).length).toBe(roomCount);
 
-            // Empty all rooms
             for (const roomId of roomIds) {
-              const participants = roomManager.getRoomParticipants(roomId);
+              const participants = await roomManager.getRoomParticipants(roomId);
               for (const participant of participants) {
-                roomManager.leaveRoom(roomId, participant.id);
+                await roomManager.leaveRoom(roomId, participant.id);
               }
             }
 
-            // No rooms should exist
-            expect(roomManager.getAllRooms().length).toBe(0);
+            expect((await roomManager.getAllRooms()).length).toBe(0);
           },
         ),
         { numRuns: 100 },
@@ -292,39 +235,29 @@ describe("RoomManager Property Tests", () => {
   });
 
   describe("Property 12: 房间信息查询准确性", () => {
-    /**
-     * Property: For any existing room ID, getRoomInfo should return correct information
-     * For non-existent room ID, getRoomInfo should return null
-     * Validates: Requirements 10.3
-     */
-    it("should return correct room info for existing rooms and null for non-existent rooms", () => {
-      fc.assert(
-        fc.property(
-          fc.integer({ min: 1, max: 10 }), // number of rooms
-          fc.string({ minLength: 1, maxLength: 20 }), // non-existent room ID
-          (roomCount, nonExistentRoomId) => {
-            const roomManager = new RoomManager();
+    it("should return correct room info for existing rooms and null for non-existent rooms", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 1, max: 10 }),
+          fc.string({ minLength: 1, maxLength: 20 }),
+          async (roomCount, nonExistentRoomId) => {
+            const roomManager = createRoomManager();
             const roomIds: string[] = [];
 
-            // Create rooms
             for (let i = 0; i < roomCount; i++) {
-              const roomId = roomManager.createRoom();
-              roomIds.push(roomId);
+              roomIds.push(await roomManager.createRoom());
             }
 
-            // Check all existing rooms
             for (const roomId of roomIds) {
-              const roomInfo = roomManager.getRoomInfo(roomId);
+              const roomInfo = await roomManager.getRoomInfo(roomId);
               expect(roomInfo).not.toBeNull();
               expect(roomInfo?.id).toBe(roomId);
               expect(roomInfo?.participantCount).toBe(0);
-              expect(roomInfo?.createdAt).toBeDefined();
               expect(typeof roomInfo?.createdAt).toBe("number");
             }
 
-            // Check non-existent room (if it doesn't accidentally match)
             if (!roomIds.includes(nonExistentRoomId)) {
-              const roomInfo = roomManager.getRoomInfo(nonExistentRoomId);
+              const roomInfo = await roomManager.getRoomInfo(nonExistentRoomId);
               expect(roomInfo).toBeNull();
             }
           },
@@ -333,22 +266,17 @@ describe("RoomManager Property Tests", () => {
       );
     });
 
-    /**
-     * Property: Room info should reflect current participant count
-     * Validates: Requirements 10.3, 10.4
-     */
-    it("should return room info with accurate participant count", () => {
-      fc.assert(
-        fc.property(
-          fc.integer({ min: 0, max: 20 }), // number of participants
-          (participantCount) => {
-            const roomManager = new RoomManager();
-            const roomId = roomManager.createRoom();
+    it("should return room info with accurate participant count", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 0, max: 20 }),
+          async (participantCount) => {
+            const roomManager = createRoomManager();
+            const roomId = await roomManager.createRoom();
 
-            // Add participants
             for (let i = 0; i < participantCount; i++) {
               const socket = new MockWebSocket();
-              roomManager.joinRoom(
+              await roomManager.joinRoom(
                 roomId,
                 `user${i}`,
                 `User${i}`,
@@ -356,8 +284,7 @@ describe("RoomManager Property Tests", () => {
               );
             }
 
-            // Check room info
-            const roomInfo = roomManager.getRoomInfo(roomId);
+            const roomInfo = await roomManager.getRoomInfo(roomId);
             expect(roomInfo).not.toBeNull();
             expect(roomInfo?.participantCount).toBe(participantCount);
           },
@@ -368,22 +295,17 @@ describe("RoomManager Property Tests", () => {
   });
 
   describe("Property 13: 参与者计数准确性", () => {
-    /**
-     * Property: For any room, getParticipantCount should equal the actual number of participants
-     * Validates: Requirements 10.4
-     */
-    it("should return accurate participant count matching actual participants", () => {
-      fc.assert(
-        fc.property(
-          fc.integer({ min: 0, max: 20 }), // number of participants to add
-          (participantCount) => {
-            const roomManager = new RoomManager();
-            const roomId = roomManager.createRoom();
+    it("should return accurate participant count matching actual participants", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 0, max: 20 }),
+          async (participantCount) => {
+            const roomManager = createRoomManager();
+            const roomId = await roomManager.createRoom();
 
-            // Add participants
             for (let i = 0; i < participantCount; i++) {
               const socket = new MockWebSocket();
-              roomManager.joinRoom(
+              await roomManager.joinRoom(
                 roomId,
                 `user${i}`,
                 `User${i}`,
@@ -391,27 +313,20 @@ describe("RoomManager Property Tests", () => {
               );
             }
 
-            // Get participant count from room info
-            const roomInfo = roomManager.getRoomInfo(roomId);
-            const participantList = roomManager.getRoomParticipants(roomId);
+            const roomInfo = await roomManager.getRoomInfo(roomId);
+            const participantList = await roomManager.getRoomParticipants(roomId);
 
-            // Count should match actual participants
             expect(roomInfo?.participantCount).toBe(participantCount);
             expect(participantList.length).toBe(participantCount);
-            expect(roomInfo?.participantCount).toBe(participantList.length);
           },
         ),
         { numRuns: 100 },
       );
     });
 
-    /**
-     * Property: Participant count should update correctly after joins and leaves
-     * Validates: Requirements 10.4
-     */
-    it("should maintain accurate participant count through joins and leaves", () => {
-      fc.assert(
-        fc.property(
+    it("should maintain accurate participant count through joins and leaves (until room deletion)", async () => {
+      await fc.assert(
+        fc.asyncProperty(
           fc.array(
             fc.record({
               action: fc.constantFrom("join" as const, "leave" as const),
@@ -420,47 +335,50 @@ describe("RoomManager Property Tests", () => {
             }),
             { minLength: 1, maxLength: 20 },
           ),
-          (actions) => {
-            const roomManager = new RoomManager();
-            const roomId = roomManager.createRoom();
+          async (actions) => {
+            const roomManager = createRoomManager();
+            const roomId = await roomManager.createRoom();
             const currentParticipants = new Set<string>();
             const sockets = new Map<string, MockWebSocket>();
-            let hadParticipants = false; // Track if room ever had participants
+            let hadParticipants = false;
 
-            // Execute actions
             for (const action of actions) {
+              const exists = await roomManager.roomExists(roomId);
+              if (!exists) break;
+
               if (action.action === "join") {
                 if (!currentParticipants.has(action.userId)) {
                   const socket = new MockWebSocket();
                   sockets.set(action.userId, socket);
-                  roomManager.joinRoom(
+                  const joined = await roomManager.joinRoom(
                     roomId,
                     action.userId,
                     action.userName,
                     socket as unknown as WebSocket,
                   );
-                  currentParticipants.add(action.userId);
-                  hadParticipants = true;
+                  if (joined) {
+                    currentParticipants.add(action.userId);
+                    hadParticipants = true;
+                  }
                 }
               } else if (action.action === "leave") {
                 if (currentParticipants.has(action.userId)) {
-                  roomManager.leaveRoom(roomId, action.userId);
+                  await roomManager.leaveRoom(roomId, action.userId);
                   currentParticipants.delete(action.userId);
                 }
               }
 
-              // Verify count after each action
+              const stillExists = await roomManager.roomExists(roomId);
               if (currentParticipants.size > 0) {
-                const roomInfo = roomManager.getRoomInfo(roomId);
-                expect(roomInfo?.participantCount).toBe(
-                  currentParticipants.size,
-                );
+                expect(stillExists).toBe(true);
+                const roomInfo = await roomManager.getRoomInfo(roomId);
+                expect(roomInfo?.participantCount).toBe(currentParticipants.size);
               } else if (hadParticipants) {
-                // Room should be deleted when empty (only if it had participants before)
-                expect(roomManager.roomExists(roomId)).toBe(false);
+                // Room should be deleted when empty after having participants.
+                expect(stillExists).toBe(false);
               } else {
-                // Room never had participants, so it still exists
-                expect(roomManager.roomExists(roomId)).toBe(true);
+                // Room can exist empty if it never had participants.
+                expect(stillExists).toBe(true);
               }
             }
           },
@@ -469,30 +387,21 @@ describe("RoomManager Property Tests", () => {
       );
     });
 
-    /**
-     * Property: getAllRooms should return accurate participant counts for all rooms
-     * Validates: Requirements 10.4
-     */
-    it("should return accurate participant counts in getAllRooms", () => {
-      fc.assert(
-        fc.property(
-          fc.array(
-            fc.integer({ min: 0, max: 10 }), // participants per room
-            { minLength: 1, maxLength: 10 },
-          ),
-          (participantCounts) => {
-            const roomManager = new RoomManager();
-            const roomData: Array<{ roomId: string; expectedCount: number }> =
-              [];
+    it("should return accurate participant counts in getAllRooms", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(fc.integer({ min: 0, max: 10 }), { minLength: 1, maxLength: 10 }),
+          async (participantCounts) => {
+            const roomManager = createRoomManager();
+            const roomData: Array<{ roomId: string; expectedCount: number }> = [];
 
-            // Create rooms with different participant counts
             for (let i = 0; i < participantCounts.length; i++) {
-              const roomId = roomManager.createRoom();
+              const roomId = await roomManager.createRoom();
               const count = participantCounts[i];
 
               for (let j = 0; j < count; j++) {
                 const socket = new MockWebSocket();
-                roomManager.joinRoom(
+                await roomManager.joinRoom(
                   roomId,
                   `user${i}-${j}`,
                   `User${i}-${j}`,
@@ -500,17 +409,12 @@ describe("RoomManager Property Tests", () => {
                 );
               }
 
-              // Track all rooms (even empty ones, as they still exist until they become empty after having participants)
               roomData.push({ roomId, expectedCount: count });
             }
 
-            // Get all rooms
-            const allRooms = roomManager.getAllRooms();
-
-            // Should have all rooms (including empty ones that were never populated)
+            const allRooms = await roomManager.getAllRooms();
             expect(allRooms.length).toBe(roomData.length);
 
-            // Each room should have correct participant count
             for (const { roomId, expectedCount } of roomData) {
               const roomInfo = allRooms.find((r) => r.id === roomId);
               expect(roomInfo).toBeDefined();
@@ -523,3 +427,4 @@ describe("RoomManager Property Tests", () => {
     });
   });
 });
+

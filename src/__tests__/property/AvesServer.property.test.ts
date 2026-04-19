@@ -158,9 +158,9 @@ describe("AvesServer Property Tests", () => {
      * Property: For any join-room message with missing required fields, server should handle gracefully
      * Validates: Requirements 10.6
      */
-    it("should handle join-room messages with missing fields", () => {
-      fc.assert(
-        fc.property(
+    it("should handle join-room messages with missing fields", async () => {
+      await fc.assert(
+        fc.asyncProperty(
           fc.oneof(
             // Missing roomId
             fc.record({
@@ -185,7 +185,7 @@ describe("AvesServer Property Tests", () => {
               type: fc.constant("join-room"),
             })
           ),
-          (invalidJoinMessage) => {
+          async (invalidJoinMessage) => {
             const server = new AvesServer({ debug: false });
             const ws = new MockWebSocket() as unknown as WebSocket;
 
@@ -198,6 +198,8 @@ describe("AvesServer Property Tests", () => {
                 Buffer.from(JSON.stringify(invalidJoinMessage))
               );
             }).not.toThrow();
+
+            await new Promise((resolve) => setImmediate(resolve));
 
             // Should send error message
             const mock = ws as any;
@@ -421,13 +423,13 @@ describe("AvesServer Property Tests", () => {
      * Property: For any join-room with non-existent room, server should handle gracefully
      * Validates: Requirements 10.6
      */
-    it("should handle join-room for non-existent rooms", () => {
-      fc.assert(
-        fc.property(
+    it("should handle join-room for non-existent rooms", async () => {
+      await fc.assert(
+        fc.asyncProperty(
           fc.string({ minLength: 1, maxLength: 50 }), // roomId
           fc.string({ minLength: 1, maxLength: 20 }), // userId
           fc.string({ minLength: 1, maxLength: 20 }), // userName
-          (roomId, userId, userName) => {
+          async (roomId, userId, userName) => {
             const server = new AvesServer({ debug: false });
             const ws = new MockWebSocket() as unknown as WebSocket;
 
@@ -447,6 +449,8 @@ describe("AvesServer Property Tests", () => {
                 Buffer.from(JSON.stringify(joinMessage))
               );
             }).not.toThrow();
+
+            await new Promise((resolve) => setImmediate(resolve));
 
             // Should send error message
             const mock = ws as any;

@@ -52,6 +52,7 @@ describe("AvesServer", () => {
         roomId,
         userId: "user1",
         userName: "Alice",
+        requestId: "join-1",
       };
       (ws2 as any).emit("message", Buffer.from(JSON.stringify(joinMsg)));
       await waitForMessages();
@@ -59,6 +60,37 @@ describe("AvesServer", () => {
       expect((ws2 as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws2 as any).sentMessages[0]);
       expect(response.type).toBe("room-joined");
+      expect(response.userId).toBe("user1");
+      expect(response.requestId).toBe("join-1");
+    });
+
+    it("should assign and return a canonical userId when join-room omits one", async () => {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      server.handleConnection(ws);
+
+      (ws as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId = JSON.parse((ws as any).sentMessages[0]).roomId;
+
+      (ws as any).sentMessages = [];
+      (ws as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userName: "Alice",
+            requestId: "join-generated",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      const response = JSON.parse((ws as any).sentMessages[0]);
+      expect(response.type).toBe("room-joined");
+      expect(response.userId).toEqual(expect.any(String));
+      expect(response.userId.length).toBeGreaterThan(0);
+      expect(response.requestId).toBe("join-generated");
     });
 
     it("should broadcast user-joined to other participants", async () => {
@@ -118,7 +150,107 @@ describe("AvesServer", () => {
 
       expect((ws as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws as any).sentMessages[0]);
+      expect(response).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "ROOM_NOT_FOUND",
+          stage: "room",
+          retryable: false,
+        }),
+      );
+    });
+
+    it("should reject duplicate userId joins from another connection", async () => {
+      const ws1 = new MockWebSocket() as unknown as WebSocket;
+      const ws2 = new MockWebSocket() as unknown as WebSocket;
+
+      server.handleConnection(ws1);
+      server.handleConnection(ws2);
+
+      (ws1 as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user1",
+            userName: "Alice",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws2 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user1",
+            userName: "Mallory",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      const response = JSON.parse((ws2 as any).sentMessages[0]);
       expect(response.type).toBe("error");
+
+      const roomInfo = await server.getRoomInfo(roomId);
+      expect(roomInfo?.participantCount).toBe(1);
+    });
+
+    it("should reject joining a second room from the same connection without leaving", async () => {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      server.handleConnection(ws);
+
+      (ws as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId1 = JSON.parse((ws as any).sentMessages[0]).roomId;
+
+      (ws as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId2 = JSON.parse((ws as any).sentMessages[1]).roomId;
+
+      (ws as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId: roomId1,
+            userId: "user1",
+            userName: "Alice",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws as any).sentMessages = [];
+
+      (ws as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId: roomId2,
+            userId: "user2",
+            userName: "Alice-2",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      expect((ws as any).sentMessages).toHaveLength(1);
+      expect(JSON.parse((ws as any).sentMessages[0])).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "ALREADY_JOINED",
+        }),
+      );
     });
   });
 
@@ -319,6 +451,137 @@ describe("AvesServer", () => {
       const received = JSON.parse((ws2 as any).sentMessages[0]);
       expect(received.type).toBe("ice-candidate");
     });
+
+    it("should reject signaling when fromId does not match the authenticated user", async () => {
+      const ws1 = new MockWebSocket() as unknown as WebSocket;
+      const ws2 = new MockWebSocket() as unknown as WebSocket;
+
+      server.handleConnection(ws1);
+      server.handleConnection(ws2);
+
+      const createMsg = { type: "create-room" };
+      (ws1 as any).emit("message", Buffer.from(JSON.stringify(createMsg)));
+      await waitForMessages();
+      const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user1",
+            userName: "Alice",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws2 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user2",
+            userName: "Bob",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws1 as any).sentMessages = [];
+      (ws2 as any).sentMessages = [];
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "offer",
+            fromId: "user2",
+            targetId: "user1",
+            offer: { type: "offer", sdp: "test-sdp" },
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      expect((ws1 as any).sentMessages).toHaveLength(1);
+      expect(JSON.parse((ws1 as any).sentMessages[0])).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "SIGNALING_FORBIDDEN",
+        }),
+      );
+      expect((ws2 as any).sentMessages).toHaveLength(0);
+    });
+
+    it("should reject signaling across different rooms", async () => {
+      const ws1 = new MockWebSocket() as unknown as WebSocket;
+      const ws2 = new MockWebSocket() as unknown as WebSocket;
+
+      server.handleConnection(ws1);
+      server.handleConnection(ws2);
+
+      (ws1 as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId1 = JSON.parse((ws1 as any).sentMessages[0]).roomId;
+
+      (ws2 as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId2 = JSON.parse((ws2 as any).sentMessages[0]).roomId;
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId: roomId1,
+            userId: "user1",
+            userName: "Alice",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws2 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId: roomId2,
+            userId: "user2",
+            userName: "Bob",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws1 as any).sentMessages = [];
+      (ws2 as any).sentMessages = [];
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "answer",
+            fromId: "user1",
+            targetId: "user2",
+            answer: { type: "answer", sdp: "test-sdp" },
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      expect((ws1 as any).sentMessages).toHaveLength(1);
+      expect(JSON.parse((ws1 as any).sentMessages[0])).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "SIGNALING_TARGET_ROOM_MISMATCH",
+        }),
+      );
+      expect((ws2 as any).sentMessages).toHaveLength(0);
+    });
   });
 
   describe("Query Methods", () => {
@@ -386,7 +649,13 @@ describe("AvesServer", () => {
 
       expect((ws as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws as any).sentMessages[0]);
-      expect(response.type).toBe("error");
+      expect(response).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "INVALID_MESSAGE_FORMAT",
+          stage: "protocol",
+        }),
+      );
     });
 
     it("should handle message without type", () => {
@@ -398,7 +667,13 @@ describe("AvesServer", () => {
 
       expect((ws as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws as any).sentMessages[0]);
-      expect(response.type).toBe("error");
+      expect(response).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "INVALID_MESSAGE",
+          stage: "protocol",
+        }),
+      );
     });
 
     it("should handle unknown message type", () => {
@@ -410,7 +685,13 @@ describe("AvesServer", () => {
 
       expect((ws as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws as any).sentMessages[0]);
-      expect(response.type).toBe("error");
+      expect(response).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "INVALID_MESSAGE",
+          stage: "protocol",
+        }),
+      );
     });
 
     it("should handle join-room with missing fields", async () => {
@@ -423,7 +704,13 @@ describe("AvesServer", () => {
 
       expect((ws as any).sentMessages).toHaveLength(1);
       const response = JSON.parse((ws as any).sentMessages[0]);
-      expect(response.type).toBe("error");
+      expect(response).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "JOIN_ROOM_MISSING_FIELDS",
+          stage: "room",
+        }),
+      );
     });
 
     it("should handle leave-room message", async () => {
@@ -441,15 +728,29 @@ describe("AvesServer", () => {
         roomId,
         userId: "user1",
         userName: "Alice",
+        requestId: "join-leave-1",
       };
       (ws as any).emit("message", Buffer.from(JSON.stringify(joinMsg)));
       await waitForMessages();
 
+      (ws as any).sentMessages = [];
+
       // Leave room
-      const leaveMsg = { type: "leave-room", userId: "user1" };
+      const leaveMsg = {
+        type: "leave-room",
+        userId: "user1",
+        requestId: "leave-1",
+      };
       (ws as any).emit("message", Buffer.from(JSON.stringify(leaveMsg)));
       await waitForMessages();
 
+      expect((ws as any).sentMessages).toHaveLength(1);
+      expect(JSON.parse((ws as any).sentMessages[0])).toEqual({
+        type: "room-left",
+        roomId,
+        userId: "user1",
+        requestId: "leave-1",
+      });
       expect(await server.getRoomInfo(roomId)).toBeNull();
     });
 
@@ -461,6 +762,139 @@ describe("AvesServer", () => {
       expect(() => {
         (ws as any).emit("message", Buffer.from(JSON.stringify(leaveMsg)));
       }).not.toThrow();
+    });
+
+    it("should reject leave-room spoofing from a different userId", async () => {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      server.handleConnection(ws);
+
+      (ws as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId = JSON.parse((ws as any).sentMessages[0]).roomId;
+
+      (ws as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user1",
+            userName: "Alice",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws as any).sentMessages = [];
+
+      (ws as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "leave-room",
+            userId: "user2",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      expect((ws as any).sentMessages).toHaveLength(1);
+      expect(JSON.parse((ws as any).sentMessages[0])).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "LEAVE_USER_MISMATCH",
+          stage: "room",
+        }),
+      );
+      expect(await server.getRoomInfo(roomId)).not.toBeNull();
+    });
+
+    it("should clear authenticated state before async leave cleanup completes", async () => {
+      const ws1 = new MockWebSocket() as unknown as WebSocket;
+      const ws2 = new MockWebSocket() as unknown as WebSocket;
+
+      server.handleConnection(ws1);
+      server.handleConnection(ws2);
+
+      (ws1 as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user1",
+            userName: "Alice",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws2 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user2",
+            userName: "Bob",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      const leaveGate = new Promise<void>((resolve) => {
+        (server as any).__resolveLeaveGate = resolve;
+      });
+      const originalHandleDisconnection = (server as any).handleDisconnection.bind(server);
+      jest
+        .spyOn(server as any, "handleDisconnection")
+        .mockImplementation(async (userId: string) => {
+          await leaveGate;
+          return originalHandleDisconnection(userId);
+        });
+
+      (ws1 as any).sentMessages = [];
+      (ws2 as any).sentMessages = [];
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "leave-room",
+            userId: "user1",
+          }),
+        ),
+      );
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "offer",
+            fromId: "user1",
+            targetId: "user2",
+            offer: { type: "offer", sdp: "test-sdp" },
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      expect((ws1 as any).sentMessages).toHaveLength(1);
+      expect(JSON.parse((ws1 as any).sentMessages[0])).toEqual(
+        expect.objectContaining({
+          type: "error",
+          code: "SIGNALING_NOT_AUTHENTICATED",
+          stage: "signaling",
+        }),
+      );
+      expect((ws2 as any).sentMessages).toHaveLength(0);
+
+      (server as any).__resolveLeaveGate();
+      await waitForMessages();
     });
 
     it("should handle offer with missing fields", () => {

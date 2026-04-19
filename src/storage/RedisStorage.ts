@@ -2,20 +2,103 @@ import { Redis } from "ioredis";
 import { Room, ParticipantInfo } from "../types/types";
 import { WebSocket } from "ws";
 import { BaseStorage } from "./BaseStorage";
+import * as crypto from "crypto";
+
+interface RedisParticipantRecord {
+  userId: string;
+  userName: string;
+  instanceId?: string;
+}
+
+interface RemoteSignalEnvelope {
+  userId: string;
+  payload: string;
+}
 
 export class RedisStorage extends BaseStorage {
-  private redis: Redis;
-  private socketMap: Map<string, WebSocket> = new Map();
-  private keyPrefix: string;
+  private readonly redis: Redis;
+  private readonly subscriber: Redis;
+  private readonly socketMap: Map<string, WebSocket> = new Map();
+  private readonly keyPrefix: string;
+  private readonly instanceId: string;
+  private readonly signalChannel: string;
+  private readonly subscriptionReady: Promise<void>;
+  private closed = false;
 
   constructor(redis: Redis, keyPrefix: string = "aves") {
     super();
     this.redis = redis;
     this.keyPrefix = keyPrefix;
+    this.instanceId = crypto.randomUUID();
+    this.subscriber = this.redis.duplicate();
+    this.signalChannel = this.key("instance", this.instanceId, "signals");
+    this.subscriptionReady = this.initializeSubscriber();
   }
 
   private key(type: string, ...parts: string[]): string {
     return `${this.keyPrefix}:${type}:${parts.join(":")}`;
+  }
+
+  private async initializeSubscriber(): Promise<void> {
+    this.subscriber.on("message", this.handleRemoteMessage);
+    await this.subscriber.subscribe(this.signalChannel);
+  }
+
+  private readonly handleRemoteMessage = (
+    channel: string,
+    payload: string,
+  ): void => {
+    if (channel !== this.signalChannel || this.closed) {
+      return;
+    }
+
+    try {
+      const message = JSON.parse(payload) as RemoteSignalEnvelope;
+      const socket = this.socketMap.get(message.userId);
+
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      socket.send(message.payload);
+    } catch (error) {
+      console.warn("Failed to forward Redis signaling message:", error);
+    }
+  };
+
+  private createRemoteSocket(userId: string, instanceId: string): WebSocket {
+    return {
+      readyState: WebSocket.OPEN,
+      send: (payload: string) => {
+        void this.redis
+          .publish(
+            this.key("instance", instanceId, "signals"),
+            JSON.stringify({ userId, payload } satisfies RemoteSignalEnvelope),
+          )
+          .catch((error) => {
+            console.warn(
+              `Failed to publish signaling message for user ${userId}:`,
+              error,
+            );
+          });
+      },
+    } as unknown as WebSocket;
+  }
+
+  private resolveParticipantSocket(
+    userId: string,
+    instanceId?: string,
+  ): WebSocket | null {
+    const localSocket = this.socketMap.get(userId);
+    if (localSocket) {
+      return localSocket;
+    }
+
+    if (!instanceId || instanceId === this.instanceId) {
+      return null;
+    }
+
+    return this.createRemoteSocket(userId, instanceId);
   }
 
   async setRoom(roomId: string, room: Room): Promise<void> {
@@ -129,6 +212,8 @@ export class RedisStorage extends BaseStorage {
     userId: string,
     participant: ParticipantInfo,
   ): Promise<void> {
+    await this.subscriptionReady;
+
     const event = this.createParticipantJoinEvent(roomId, userId, participant);
     const shouldProceed = await this.emitBeforeChange(event);
     if (!shouldProceed) return;
@@ -136,6 +221,7 @@ export class RedisStorage extends BaseStorage {
     const participantData = {
       userId: participant.userId,
       userName: participant.userName,
+      instanceId: this.instanceId,
     };
     await this.redis.hset(
       this.key("room", roomId, "participant", userId),
@@ -151,14 +237,17 @@ export class RedisStorage extends BaseStorage {
     roomId: string,
     userId: string,
   ): Promise<ParticipantInfo | null> {
-    const participantData = await this.redis.hgetall(
+    const participantData = (await this.redis.hgetall(
       this.key("room", roomId, "participant", userId),
-    );
+    )) as unknown as RedisParticipantRecord;
     if (!participantData || !participantData.userId) {
       return null;
     }
 
-    const socket = this.socketMap.get(userId);
+    const socket = this.resolveParticipantSocket(
+      userId,
+      participantData.instanceId,
+    );
     if (!socket) {
       return null;
     }
@@ -213,14 +302,17 @@ export class RedisStorage extends BaseStorage {
       const userId = participantIds[i];
       const [err, participantData] = results[i] as [
         Error | null,
-        Record<string, string> | null,
+        RedisParticipantRecord | null,
       ];
 
       if (err || !participantData || !participantData.userId) {
         continue;
       }
 
-      const socket = this.socketMap.get(userId);
+      const socket = this.resolveParticipantSocket(
+        userId,
+        participantData.instanceId,
+      );
       if (!socket) {
         continue;
       }
@@ -233,5 +325,37 @@ export class RedisStorage extends BaseStorage {
     }
 
     return participants;
+  }
+
+  close(): void {
+    if (this.closed) {
+      return;
+    }
+
+    this.closed = true;
+    this.socketMap.clear();
+    this.subscriber.removeListener("message", this.handleRemoteMessage);
+
+    void this.shutdownSubscriber();
+  }
+
+  private async shutdownSubscriber(): Promise<void> {
+    try {
+      await this.subscriptionReady;
+    } catch {
+      // Ignore subscription setup failures during shutdown.
+    }
+
+    try {
+      await this.subscriber.unsubscribe(this.signalChannel);
+    } catch {
+      // Ignore unsubscribe failures during shutdown.
+    }
+
+    try {
+      await this.subscriber.quit();
+    } catch {
+      // Ignore quit failures during shutdown.
+    }
   }
 }

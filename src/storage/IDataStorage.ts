@@ -22,4 +22,6 @@ export interface IDataStorage {
   ): Promise<ParticipantInfo | null>;
   deleteParticipant(roomId: string, userId: string): Promise<void>;
   getAllParticipants(roomId: string): Promise<Map<string, ParticipantInfo>>;
+
+  close?(): void | Promise<void>;
 }

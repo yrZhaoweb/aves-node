@@ -53,6 +53,11 @@ export class RoomManager {
       return false;
     }
 
+    const normalizedUserId = userId.trim();
+    if (!normalizedUserId) {
+      return false;
+    }
+
     if (room.password && room.password !== password) {
       return false;
     }
@@ -61,14 +66,19 @@ export class RoomManager {
       return false;
     }
 
+    const existingRoomId = await this.storage.getUserRoom(normalizedUserId);
+    if (existingRoomId) {
+      return false;
+    }
+
     const participantInfo: ParticipantInfo = {
-      userId,
+      userId: normalizedUserId,
       userName,
       socket,
     };
 
-    await this.storage.setParticipant(roomId, userId, participantInfo);
-    await this.storage.setUserRoom(userId, roomId);
+    await this.storage.setParticipant(roomId, normalizedUserId, participantInfo);
+    await this.storage.setUserRoom(normalizedUserId, roomId);
 
     return true;
   }

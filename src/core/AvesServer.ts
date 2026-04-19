@@ -8,6 +8,9 @@ import {
   InboundSignalingMessage,
   OutboundSignalingMessage,
   RedisConfig,
+  SignalingErrorCode,
+  SignalingErrorPayload,
+  SignalingErrorStage,
 } from "../types/types";
 import { IDataStorage } from "../storage/IDataStorage";
 import { MemoryStorage } from "../storage/MemoryStorage";
@@ -90,14 +93,24 @@ export class AvesServer {
           console.log("[AvesServer] Received message:", message);
         }
 
-        this.routeMessage(ws, message, (userId) => {
+        this.routeMessage(ws, message, currentUserId, (userId) => {
           currentUserId = userId;
         }).catch((error) => {
           console.error("[AvesServer] Error handling message:", error);
         });
       } catch (error) {
-        console.error("[AvesServer] Failed to parse message:", error);
-        this.sendError(ws, "Invalid message format");
+        if (this.config.debug) {
+          console.error("[AvesServer] Failed to parse message:", error);
+        }
+        this.sendError(
+          ws,
+          this.createErrorPayload(
+            "Invalid message format",
+            "INVALID_MESSAGE_FORMAT",
+            "protocol",
+            false,
+          ),
+        );
       }
     });
 
@@ -110,7 +123,9 @@ export class AvesServer {
       this.connections.delete(ws);
 
       if (currentUserId) {
-        this.handleDisconnection(currentUserId);
+        const disconnectedUserId = currentUserId;
+        currentUserId = undefined;
+        this.handleDisconnection(disconnectedUserId);
       }
     });
 
@@ -127,10 +142,19 @@ export class AvesServer {
   private async routeMessage(
     ws: WebSocket,
     message: unknown,
-    setUserId: (userId: string) => void,
+    authenticatedUserId: string | undefined,
+    setUserId: (userId?: string) => void,
   ): Promise<void> {
     if (!this.isValidInboundMessage(message)) {
-      this.sendError(ws, "Invalid message: missing or invalid type field");
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          "Invalid message: missing or invalid type field",
+          "INVALID_MESSAGE",
+          "protocol",
+          false,
+        ),
+      );
       return;
     }
 
@@ -140,23 +164,23 @@ export class AvesServer {
         break;
 
       case "join-room":
-        await this.handleJoinRoom(ws, message, setUserId);
+        await this.handleJoinRoom(ws, message, authenticatedUserId, setUserId);
         break;
 
       case "leave-room":
-        this.handleLeaveRoom(message);
+        await this.handleLeaveRoom(ws, message, authenticatedUserId, setUserId);
         break;
 
       case "offer":
-        this.handleOffer(message);
+        await this.handleOffer(ws, authenticatedUserId, message);
         break;
 
       case "answer":
-        this.handleAnswer(message);
+        await this.handleAnswer(ws, authenticatedUserId, message);
         break;
 
       case "ice-candidate":
-        this.handleIceCandidate(message);
+        await this.handleIceCandidate(ws, authenticatedUserId, message);
         break;
 
       default: {
@@ -169,7 +193,12 @@ export class AvesServer {
         }
         this.sendError(
           ws,
-          `Unknown message type: ${(message as { type: string }).type}`,
+          this.createErrorPayload(
+            `Unknown message type: ${(message as { type: string }).type}`,
+            "INVALID_MESSAGE",
+            "protocol",
+            false,
+          ),
         );
       }
     }
@@ -211,6 +240,7 @@ export class AvesServer {
     const response: OutboundSignalingMessage = {
       type: "room-created",
       roomId,
+      requestId: message.requestId,
     };
 
     this.sendMessage(ws, response);
@@ -226,23 +256,71 @@ export class AvesServer {
   private async handleJoinRoom(
     ws: WebSocket,
     message: Extract<InboundSignalingMessage, { type: "join-room" }>,
+    authenticatedUserId: string | undefined,
     setUserId: (userId: string) => void,
   ): Promise<void> {
     const { roomId, userName, password } = message;
     let userId = message.userId;
 
+    if (authenticatedUserId) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          "Connection already joined to a room; leave first",
+          "ALREADY_JOINED",
+          "room",
+          false,
+          message.requestId,
+        ),
+      );
+      return;
+    }
+
     if (!roomId || !userName) {
-      this.sendError(ws, "Missing required fields: roomId, userName");
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          "Missing required fields: roomId, userName",
+          "JOIN_ROOM_MISSING_FIELDS",
+          "room",
+          false,
+          message.requestId,
+        ),
+      );
       return;
     }
 
     if (!userId) {
       userId = this.generateUserId();
+    } else {
+      userId = userId.trim();
+      if (userId.length === 0) {
+        this.sendError(
+          ws,
+          this.createErrorPayload(
+            "Invalid userId",
+            "ROOM_JOIN_FAILED",
+            "room",
+            false,
+            message.requestId,
+          ),
+        );
+        return;
+      }
     }
 
     const roomExists = await this.roomManager.roomExists(roomId);
     if (!roomExists) {
-      this.sendError(ws, `Room ${roomId} does not exist`);
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          `Room ${roomId} does not exist`,
+          "ROOM_NOT_FOUND",
+          "room",
+          false,
+          message.requestId,
+        ),
+      );
       return;
     }
 
@@ -260,7 +338,13 @@ export class AvesServer {
     if (!success) {
       this.sendError(
         ws,
-        `Failed to join room ${roomId}. Check password or room capacity.`,
+        this.createErrorPayload(
+          `Failed to join room ${roomId}. Check password or room capacity.`,
+          "ROOM_JOIN_FAILED",
+          "room",
+          false,
+          message.requestId,
+        ),
       );
       return;
     }
@@ -271,6 +355,7 @@ export class AvesServer {
       type: "room-joined",
       participants: currentParticipants,
       userId,
+      requestId: message.requestId,
     };
     this.sendMessage(ws, joinedResponse);
 
@@ -292,9 +377,12 @@ export class AvesServer {
   /**
    * Handle leave-room message
    */
-  private handleLeaveRoom(
+  private async handleLeaveRoom(
+    ws: WebSocket,
     message: Extract<InboundSignalingMessage, { type: "leave-room" }>,
-  ): void {
+    authenticatedUserId: string | undefined,
+    setUserId: (userId?: string) => void,
+  ): Promise<void> {
     const { userId } = message;
 
     if (!userId) {
@@ -302,7 +390,46 @@ export class AvesServer {
       return;
     }
 
-    this.handleDisconnection(userId);
+    if (!authenticatedUserId) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          "Leave denied: user is not joined to a room",
+          "LEAVE_NOT_JOINED",
+          "room",
+          false,
+          message.requestId,
+        ),
+      );
+      return;
+    }
+
+    if (userId !== authenticatedUserId) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          "Leave denied: userId does not match the authenticated connection",
+          "LEAVE_USER_MISMATCH",
+          "room",
+          false,
+          message.requestId,
+        ),
+      );
+      return;
+    }
+
+    setUserId(undefined);
+    const roomId = await this.roomManager.getRoomIdByUserId(userId);
+    await this.handleDisconnection(userId);
+
+    if (roomId) {
+      this.sendMessage(ws, {
+        type: "room-left",
+        roomId,
+        userId,
+        requestId: message.requestId,
+      });
+    }
   }
 
   /**
@@ -332,10 +459,24 @@ export class AvesServer {
   /**
    * Handle offer message
    */
-  private handleOffer(
+  private async handleOffer(
+    ws: WebSocket,
+    authenticatedUserId: string | undefined,
     message: Extract<InboundSignalingMessage, { type: "offer" }>,
-  ): void {
-    this.signalingHandler.handleOffer(
+  ): Promise<void> {
+    if (
+      !(await this.authorizeSignalingMessage(
+        ws,
+        authenticatedUserId,
+        message.fromId,
+        message.targetId,
+        "offer",
+      ))
+    ) {
+      return;
+    }
+
+    await this.signalingHandler.handleOffer(
       message.fromId,
       message.targetId,
       message.offer,
@@ -345,10 +486,24 @@ export class AvesServer {
   /**
    * Handle answer message
    */
-  private handleAnswer(
+  private async handleAnswer(
+    ws: WebSocket,
+    authenticatedUserId: string | undefined,
     message: Extract<InboundSignalingMessage, { type: "answer" }>,
-  ): void {
-    this.signalingHandler.handleAnswer(
+  ): Promise<void> {
+    if (
+      !(await this.authorizeSignalingMessage(
+        ws,
+        authenticatedUserId,
+        message.fromId,
+        message.targetId,
+        "answer",
+      ))
+    ) {
+      return;
+    }
+
+    await this.signalingHandler.handleAnswer(
       message.fromId,
       message.targetId,
       message.answer,
@@ -358,14 +513,135 @@ export class AvesServer {
   /**
    * Handle ice-candidate message
    */
-  private handleIceCandidate(
+  private async handleIceCandidate(
+    ws: WebSocket,
+    authenticatedUserId: string | undefined,
     message: Extract<InboundSignalingMessage, { type: "ice-candidate" }>,
-  ): void {
-    this.signalingHandler.handleIceCandidate(
+  ): Promise<void> {
+    if (
+      !(await this.authorizeSignalingMessage(
+        ws,
+        authenticatedUserId,
+        message.fromId,
+        message.targetId,
+        "ice-candidate",
+      ))
+    ) {
+      return;
+    }
+
+    await this.signalingHandler.handleIceCandidate(
       message.fromId,
       message.targetId,
       message.candidate,
     );
+  }
+
+  /**
+   * Validate that the active connection may send the signaling message.
+   * This prevents spoofed fromId/targetId values and cross-room routing.
+   */
+  private async authorizeSignalingMessage(
+    ws: WebSocket,
+    authenticatedUserId: string | undefined,
+    fromId: unknown,
+    targetId: unknown,
+    messageType: "offer" | "answer" | "ice-candidate",
+  ): Promise<boolean> {
+    if (!authenticatedUserId) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          `Rejected ${messageType}: user is not joined to a room`,
+          "SIGNALING_NOT_AUTHENTICATED",
+          "signaling",
+          false,
+        ),
+      );
+      return false;
+    }
+
+    if (typeof fromId !== "string" || fromId.trim().length === 0) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          `Rejected ${messageType}: missing fromId`,
+          "INVALID_MESSAGE",
+          "signaling",
+          false,
+        ),
+      );
+      return false;
+    }
+
+    if (typeof targetId !== "string" || targetId.trim().length === 0) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          `Rejected ${messageType}: missing targetId`,
+          "INVALID_MESSAGE",
+          "signaling",
+          false,
+        ),
+      );
+      return false;
+    }
+
+    if (fromId !== authenticatedUserId) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          `Rejected ${messageType}: fromId does not match the authenticated user`,
+          "SIGNALING_FORBIDDEN",
+          "signaling",
+          false,
+        ),
+      );
+      return false;
+    }
+
+    const senderRoomId = await this.roomManager.getRoomIdByUserId(authenticatedUserId);
+    if (!senderRoomId) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          `Rejected ${messageType}: sender is not in a room`,
+          "SIGNALING_NOT_AUTHENTICATED",
+          "signaling",
+          false,
+        ),
+      );
+      return false;
+    }
+
+    const targetRoomId = await this.roomManager.getRoomIdByUserId(targetId);
+    if (!targetRoomId) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          `Rejected ${messageType}: target user is not in a room`,
+          "SIGNALING_TARGET_NOT_FOUND",
+          "signaling",
+          true,
+        ),
+      );
+      return false;
+    }
+
+    if (senderRoomId !== targetRoomId) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          `Rejected ${messageType}: peers must belong to the same room`,
+          "SIGNALING_TARGET_ROOM_MISMATCH",
+          "signaling",
+          false,
+        ),
+      );
+      return false;
+    }
+
+    return true;
   }
 
   /**
@@ -414,6 +690,13 @@ export class AvesServer {
     }
     this.connections.clear();
 
+    const storageCloseResult = this.storage.close?.();
+    if (storageCloseResult instanceof Promise) {
+      void storageCloseResult.catch((error) => {
+        console.error("[AvesServer] Failed to close storage:", error);
+      });
+    }
+
     if (this.config.debug) {
       console.log("[AvesServer] Server closed");
     }
@@ -435,10 +718,26 @@ export class AvesServer {
   /**
    * Send an error message to a WebSocket connection
    */
-  private sendError(ws: WebSocket, errorMessage: string): void {
+  private createErrorPayload(
+    message: string,
+    code: SignalingErrorCode,
+    stage: SignalingErrorStage,
+    retryable: boolean,
+    requestId?: string,
+  ): SignalingErrorPayload {
+    return {
+      message,
+      code,
+      stage,
+      retryable,
+      requestId,
+    };
+  }
+
+  private sendError(ws: WebSocket, error: SignalingErrorPayload): void {
     const message: OutboundSignalingMessage = {
       type: "error",
-      message: errorMessage,
+      ...error,
     };
     this.sendMessage(ws, message);
   }
