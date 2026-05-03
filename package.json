@@ -1,17 +1,25 @@
 {
   "name": "@yrzhao/aves-node",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "WebRTC signaling server library for Node.js",
   "main": "dist/index.js",
-  "module": "dist/index.mjs",
+  "module": "dist/esm/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "npm run build:cjs && npm run build:esm && npm run build:types",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && npm run build:cjs && npm run build:esm && npm run build:types",
     "build:cjs": "tsc --module commonjs --outDir dist && cp dist/index.js dist/index.cjs || true",
-    "build:esm": "tsc --module esnext --outDir dist/esm && cp dist/esm/index.js dist/index.mjs",
+    "build:esm": "tsc --module esnext --outDir dist/esm && node scripts/fix-esm-imports.js dist/esm",
     "build:types": "tsc --declaration --emitDeclarationOnly --outDir dist",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -29,6 +37,7 @@
     }
   },
   "devDependencies": {
+    "@yrzhao/aves-core": "file:../aves-core",
     "@types/jest": "^29.5.0",
     "@types/node": "^20.0.0",
     "@types/ws": "^8.5.0",

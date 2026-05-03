@@ -634,6 +634,10 @@
   dependencies:
     "@types/yargs-parser" "*"
 
+"@yrzhao/aves-core@file:../aves-core":
+  version "0.3.0"
+  resolved "file:../aves-core"
+
 ansi-escapes@^4.2.1:
   version "4.3.2"
   resolved "https://registry.npmjs.org/ansi-escapes/-/ansi-escapes-4.3.2.tgz"

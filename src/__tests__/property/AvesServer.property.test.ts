@@ -11,6 +11,17 @@ import * as fc from "fast-check";
 import { AvesServer } from "../../core/AvesServer";
 import { WebSocket } from "ws";
 import { EventEmitter } from "events";
+import { AvesLogger } from "../../types/types";
+
+const quietLogger: AvesLogger = {
+  debug: jest.fn(),
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+};
+
+const createQuietServer = () =>
+  new AvesServer({ debug: false, logger: quietLogger });
 
 // Mock WebSocket that extends EventEmitter
 class MockWebSocket extends EventEmitter {
@@ -46,7 +57,7 @@ describe("AvesServer Property Tests", () => {
             }
           }),
           (invalidJson) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -82,7 +93,7 @@ describe("AvesServer Property Tests", () => {
             content: fc.anything(),
           }),
           (messageWithoutType) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -129,7 +140,7 @@ describe("AvesServer Property Tests", () => {
                 ].includes(s)
             ),
           (unknownType) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -186,7 +197,7 @@ describe("AvesServer Property Tests", () => {
             })
           ),
           async (invalidJoinMessage) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -295,7 +306,7 @@ describe("AvesServer Property Tests", () => {
             })
           ),
           (invalidSignalingMessage) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -328,7 +339,7 @@ describe("AvesServer Property Tests", () => {
             // userId is missing
           }),
           (invalidLeaveMessage) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -364,7 +375,7 @@ describe("AvesServer Property Tests", () => {
             fc.constant(null)
           ),
           (nonStringType) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -398,7 +409,7 @@ describe("AvesServer Property Tests", () => {
         fc.property(
           fc.object(), // Generate arbitrary objects
           (arbitraryMessage) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -430,7 +441,7 @@ describe("AvesServer Property Tests", () => {
           fc.string({ minLength: 1, maxLength: 20 }), // userId
           fc.string({ minLength: 1, maxLength: 20 }), // userName
           async (roomId, userId, userName) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -474,7 +485,7 @@ describe("AvesServer Property Tests", () => {
         fc.property(
           fc.string({ minLength: 1, maxLength: 100 }), // error message
           (errorMessage) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -498,7 +509,7 @@ describe("AvesServer Property Tests", () => {
     it("should handle connection close without userId", () => {
       fc.assert(
         fc.property(fc.constant(true), () => {
-          const server = new AvesServer({ debug: false });
+          const server = createQuietServer();
           const ws = new MockWebSocket() as unknown as WebSocket;
 
           server.handleConnection(ws);
@@ -531,7 +542,7 @@ describe("AvesServer Property Tests", () => {
             { minLength: 1, maxLength: 10 }
           ),
           (invalidMessages) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);
@@ -560,7 +571,7 @@ describe("AvesServer Property Tests", () => {
     it("should handle empty messages", () => {
       fc.assert(
         fc.property(fc.constant(true), () => {
-          const server = new AvesServer({ debug: false });
+          const server = createQuietServer();
           const ws = new MockWebSocket() as unknown as WebSocket;
 
           server.handleConnection(ws);
@@ -613,7 +624,7 @@ describe("AvesServer Property Tests", () => {
             })
           ),
           (messageWithNull) => {
-            const server = new AvesServer({ debug: false });
+            const server = createQuietServer();
             const ws = new MockWebSocket() as unknown as WebSocket;
 
             server.handleConnection(ws);

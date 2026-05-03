@@ -8,8 +8,11 @@
 export { AvesServer } from "./core/AvesServer";
 
 // Core components (for advanced usage)
+export { AvesError } from "./core/AvesError";
+export type { AvesErrorCode } from "./core/AvesError";
 export { RoomManager } from "./core/RoomManager";
 export { SignalingHandler } from "./core/SignalingHandler";
+export { RateLimiter } from "./core/RateLimiter";
 
 // Storage interfaces and implementations
 export type { IDataStorage } from "./storage/IDataStorage";
@@ -41,6 +44,7 @@ export { toRoomData, toParticipantData } from "./storage/StorageEvents";
 export type {
   Participant,
   AvesServerConfig,
+  HealthStatus,
   RedisConfig,
   RoomInfo,
   ParticipantInfo,

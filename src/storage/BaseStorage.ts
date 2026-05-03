@@ -191,7 +191,7 @@ export abstract class BaseStorage implements IDataStorage {
   abstract getAllRooms(): Promise<Room[]>;
   abstract roomExists(roomId: string): Promise<boolean>;
 
-  abstract setUserRoom(userId: string, roomId: string): Promise<void>;
+  abstract setUserRoom(userId: string, roomId: string): Promise<boolean>;
   abstract getUserRoom(userId: string): Promise<string | null>;
   abstract deleteUserRoom(userId: string): Promise<void>;
 
@@ -199,7 +199,7 @@ export abstract class BaseStorage implements IDataStorage {
     roomId: string,
     userId: string,
     participant: ParticipantInfo,
-  ): Promise<void>;
+  ): Promise<boolean>;
   abstract getParticipant(
     roomId: string,
     userId: string,

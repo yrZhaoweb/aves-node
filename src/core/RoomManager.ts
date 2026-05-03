@@ -1,5 +1,6 @@
 import { WebSocket } from "ws";
 import * as crypto from "crypto";
+import { AvesError } from "./AvesError";
 import {
   Room,
   ParticipantInfo,
@@ -10,26 +11,47 @@ import {
 } from "../types/types";
 import { IDataStorage } from "../storage/IDataStorage";
 
+const HASH_LENGTH = 64;
+const HASH_SALT_LENGTH = 16;
+const HASH_DELIMITER = ":";
+
 /**
  * RoomManager handles room lifecycle and participant management
  */
 export class RoomManager {
   private storage: IDataStorage;
+  private errorCallbacks = new Set<(error: AvesError) => void>();
 
   constructor(storage: IDataStorage) {
     this.storage = storage;
   }
 
   /**
-   * Create a new room and return its unique ID
+   * Register a callback for RoomManager-level errors
+   * (e.g. WebSocket send failures, missing users).
+   */
+  onError(callback: (error: AvesError) => void): void {
+    this.errorCallbacks.add(callback);
+  }
+
+  private emitError(error: AvesError): void {
+    this.errorCallbacks.forEach((cb) => cb(error));
+  }
+
+  /**
+   * Create a new room and return its unique ID.
+   * Passwords are hashed with scrypt before storage.
    */
   async createRoom(options?: CreateRoomOptions): Promise<string> {
     const roomId = this.generateRoomId();
+    const hashedPassword = options?.password
+      ? await hashPassword(options.password)
+      : undefined;
     const room: Room = {
       id: roomId,
       name: options?.name,
       maxCapacity: options?.maxCapacity,
-      password: options?.password,
+      password: hashedPassword,
       participants: new Map(),
       createdAt: Date.now(),
     };
@@ -58,29 +80,46 @@ export class RoomManager {
       return false;
     }
 
-    if (room.password && room.password !== password) {
-      return false;
+    if (room.password) {
+      const match = await verifyPassword(password ?? "", room.password);
+      if (!match) {
+        return false;
+      }
     }
 
     if (room.maxCapacity && room.participants.size >= room.maxCapacity) {
       return false;
     }
 
-    const existingRoomId = await this.storage.getUserRoom(normalizedUserId);
-    if (existingRoomId) {
+    // Atomically bind user to room first — prevents race conditions
+    // in multi-instance deployments.
+    const bound = await this.storage.setUserRoom(normalizedUserId, roomId);
+    if (!bound) {
       return false;
     }
 
-    const participantInfo: ParticipantInfo = {
-      userId: normalizedUserId,
-      userName,
-      socket,
-    };
+    try {
+      const participantInfo: ParticipantInfo = {
+        userId: normalizedUserId,
+        userName,
+        socket,
+      };
 
-    await this.storage.setParticipant(roomId, normalizedUserId, participantInfo);
-    await this.storage.setUserRoom(normalizedUserId, roomId);
+      const stored = await this.storage.setParticipant(
+        roomId,
+        normalizedUserId,
+        participantInfo,
+      );
+      if (!stored) {
+        await this.storage.deleteUserRoom(normalizedUserId);
+        return false;
+      }
 
-    return true;
+      return true;
+    } catch (error) {
+      await this.storage.deleteUserRoom(normalizedUserId);
+      throw error;
+    }
   }
 
   /**
@@ -141,7 +180,9 @@ export class RoomManager {
         try {
           participant.socket.send(messageStr);
         } catch (error) {
-          console.warn(`Failed to send message to user ${userId}:`, error);
+          this.emitError(
+            new AvesError({ message: `Failed to send broadcast to user ${userId}`, code: "SERVER_ERROR", stage: "transport", retryable: true }),
+          );
         }
       }
     });
@@ -153,7 +194,9 @@ export class RoomManager {
   async sendToUser(userId: string, message: SignalingMessage): Promise<void> {
     const roomId = await this.storage.getUserRoom(userId);
     if (!roomId) {
-      console.warn(`User ${userId} not found in any room`);
+      this.emitError(
+        new AvesError({ message: `sendToUser failed: user ${userId} not found in any room`, code: "SIGNALING_TARGET_NOT_FOUND", stage: "signaling", retryable: false }),
+      );
       return;
     }
 
@@ -166,7 +209,9 @@ export class RoomManager {
       try {
         participant.socket.send(JSON.stringify(message));
       } catch (error) {
-        console.warn(`Failed to send message to user ${userId}:`, error);
+        this.emitError(
+          new AvesError({ message: `Failed to send message to user ${userId}`, code: "SERVER_ERROR", stage: "transport", retryable: true }),
+        );
       }
     }
   }
@@ -214,4 +259,45 @@ export class RoomManager {
   private generateRoomId(): string {
     return `room-${crypto.randomBytes(8).toString("hex")}`;
   }
+}
+
+/**
+ * Hash a password using scrypt with a random salt.
+ * Returns "salt:hash" as a hex-encoded string.
+ */
+async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.randomBytes(HASH_SALT_LENGTH);
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, HASH_LENGTH, (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(`${salt.toString("hex")}${HASH_DELIMITER}${derivedKey.toString("hex")}`);
+    });
+  });
+}
+
+/**
+ * Verify a password against a stored "salt:hash" string.
+ */
+async function verifyPassword(
+  password: string,
+  stored: string,
+): Promise<boolean> {
+  const delimiterIndex = stored.indexOf(HASH_DELIMITER);
+  if (delimiterIndex === -1) {
+    // Legacy plain-text password: fall back to direct comparison
+    return password === stored;
+  }
+
+  const saltHex = stored.slice(0, delimiterIndex);
+  const hashHex = stored.slice(delimiterIndex + 1);
+
+  const salt = Buffer.from(saltHex, "hex");
+  const expectedHash = Buffer.from(hashHex, "hex");
+
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, HASH_LENGTH, (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(crypto.timingSafeEqual(derivedKey, expectedHash));
+    });
+  });
 }

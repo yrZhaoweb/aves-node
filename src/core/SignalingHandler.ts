@@ -1,3 +1,4 @@
+import { AvesError } from "./AvesError";
 import { RoomManager } from "./RoomManager";
 import {
   SignalingMessage,
@@ -11,9 +12,22 @@ import {
  */
 export class SignalingHandler {
   private roomManager: RoomManager;
+  private errorCallbacks = new Set<(error: AvesError) => void>();
 
   constructor(roomManager: RoomManager) {
     this.roomManager = roomManager;
+  }
+
+  /**
+   * Register a callback for SignalingHandler-level errors
+   * (e.g. invalid offer/answer/ICE candidate received).
+   */
+  onError(callback: (error: AvesError) => void): void {
+    this.errorCallbacks.add(callback);
+  }
+
+  private emitError(error: AvesError): void {
+    this.errorCallbacks.forEach((cb) => cb(error));
   }
 
   /**
@@ -26,7 +40,9 @@ export class SignalingHandler {
     offer: RTCSessionDescriptionInit,
   ): Promise<void> {
     if (!this.validateOffer(offer)) {
-      console.warn(`Invalid offer from ${fromId} to ${targetId}`);
+      this.emitError(
+        new AvesError({ message: `Invalid offer from ${fromId} to ${targetId}`, code: "INVALID_MESSAGE", stage: "signaling", retryable: false }),
+      );
       return;
     }
     await this.forwardMessage(targetId, {
@@ -47,7 +63,9 @@ export class SignalingHandler {
     answer: RTCSessionDescriptionInit,
   ): Promise<void> {
     if (!this.validateAnswer(answer)) {
-      console.warn(`Invalid answer from ${fromId} to ${targetId}`);
+      this.emitError(
+        new AvesError({ message: `Invalid answer from ${fromId} to ${targetId}`, code: "INVALID_MESSAGE", stage: "signaling", retryable: false }),
+      );
       return;
     }
     await this.forwardMessage(targetId, {
@@ -68,7 +86,9 @@ export class SignalingHandler {
     candidate: RTCIceCandidateInit,
   ): Promise<void> {
     if (!this.validateIceCandidate(candidate)) {
-      console.warn(`Invalid ICE candidate from ${fromId} to ${targetId}`);
+      this.emitError(
+        new AvesError({ message: `Invalid ICE candidate from ${fromId} to ${targetId}`, code: "INVALID_MESSAGE", stage: "signaling", retryable: false }),
+      );
       return;
     }
     await this.forwardMessage(targetId, {
@@ -90,8 +110,7 @@ export class SignalingHandler {
   }
 
   /**
-   * Validate a signaling message has all required fields
-   * Requirements: 9.6
+   * Validate a signaling message has all required fields.
    */
   validateSignalingMessage(message: unknown): boolean {
     if (!message || typeof message !== "object") {
@@ -115,9 +134,6 @@ export class SignalingHandler {
     }
   }
 
-  /**
-   * Validate peer IDs are non-empty strings
-   */
   private validatePeerIds(fromId: unknown, targetId: unknown): boolean {
     return (
       typeof fromId === "string" &&
@@ -131,35 +147,50 @@ export class SignalingHandler {
    * Validate a session description (offer or answer) has required fields
    */
   private validateSessionDescription(
-    description: any,
+    description: unknown,
     expectedType: "offer" | "answer",
   ): boolean {
+    if (!description || typeof description !== "object") {
+      return false;
+    }
+
+    const record = description as Record<string, unknown>;
     return !!(
-      description &&
-      typeof description === "object" &&
-      description.type === expectedType &&
-      typeof description.sdp === "string" &&
-      description.sdp.length > 0
+      record.type === expectedType &&
+      typeof record.sdp === "string" &&
+      record.sdp.length > 0
     );
   }
 
-  private validateOffer(offer: any): boolean {
+  private validateOffer(offer: unknown): boolean {
     return this.validateSessionDescription(offer, "offer");
   }
 
-  private validateAnswer(answer: any): boolean {
+  private validateAnswer(answer: unknown): boolean {
     return this.validateSessionDescription(answer, "answer");
   }
 
   /**
    * Validate an ICE candidate has required fields
    */
-  private validateIceCandidate(candidate: any): boolean {
+  private validateIceCandidate(candidate: unknown): boolean {
+    if (!candidate || typeof candidate !== "object") {
+      return false;
+    }
+
+    const record = candidate as Record<string, unknown>;
+    const sdpMid = record.sdpMid;
+    const sdpMLineIndex = record.sdpMLineIndex;
+
     return !!(
-      candidate &&
-      typeof candidate === "object" &&
-      typeof candidate.candidate === "string" &&
-      candidate.candidate.length > 0
+      typeof record.candidate === "string" &&
+      record.candidate.length > 0 &&
+      (sdpMid === undefined || sdpMid === null || typeof sdpMid === "string") &&
+      (sdpMLineIndex === undefined ||
+        sdpMLineIndex === null ||
+        (typeof sdpMLineIndex === "number" &&
+          Number.isInteger(sdpMLineIndex) &&
+          sdpMLineIndex >= 0))
     );
   }
 }

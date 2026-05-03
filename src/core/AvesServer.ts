@@ -1,9 +1,14 @@
 import { WebSocket } from "ws";
-import { Redis } from "ioredis";
+import type { Redis } from "ioredis";
+import type { IncomingMessage } from "http";
+import { AvesError } from "./AvesError";
 import { RoomManager } from "./RoomManager";
 import { SignalingHandler } from "./SignalingHandler";
+import { RateLimiter } from "./RateLimiter";
 import {
   AvesServerConfig,
+  AvesLogger,
+  HealthStatus,
   RoomInfo,
   InboundSignalingMessage,
   OutboundSignalingMessage,
@@ -17,6 +22,34 @@ import { MemoryStorage } from "../storage/MemoryStorage";
 import { RedisStorage } from "../storage/RedisStorage";
 import * as crypto from "crypto";
 
+type NormalizedAvesLogger = Required<AvesLogger>;
+
+function writeConsoleLog(
+  level: "debug" | "info" | "warn" | "error",
+): (message: string, context?: Record<string, unknown>) => void {
+  return (message, context) => {
+    if (context === undefined) {
+      console[level](message);
+      return;
+    }
+
+    console[level](message, context);
+  };
+}
+
+function createLogger(logger?: AvesLogger): NormalizedAvesLogger {
+  return {
+    debug: logger?.debug ?? writeConsoleLog("debug"),
+    info: logger?.info ?? writeConsoleLog("info"),
+    warn: logger?.warn ?? writeConsoleLog("warn"),
+    error: logger?.error ?? writeConsoleLog("error"),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * AvesServer is the main class for the aves-node signaling server
  * It coordinates RoomManager and SignalingHandler to provide WebRTC signaling functionality
@@ -28,43 +61,51 @@ export class AvesServer {
   private config: AvesServerConfig;
   private storage: IDataStorage;
   private connections: Set<WebSocket> = new Set();
+  private rateLimiter: RateLimiter;
+  private maxMessageSize: number;
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly startTime: number;
+  private readonly logger: NormalizedAvesLogger;
 
   /**
    * Create a new AvesServer instance
    * @param config Optional configuration object
    */
   constructor(config?: AvesServerConfig) {
+    this.startTime = Date.now();
+    this.logger = createLogger(config?.logger);
+
     this.config = {
       debug: config?.debug ?? false,
       roomTimeout: config?.roomTimeout ?? 0,
       redis: config?.redis,
+      rateLimit: config?.rateLimit ?? { maxTokens: 60, refillRate: 10 },
+      maxMessageSize: config?.maxMessageSize ?? 65536,
     };
+
+    this.rateLimiter = new RateLimiter(
+      this.config.rateLimit!.maxTokens,
+      this.config.rateLimit!.refillRate,
+    );
+    this.maxMessageSize = this.config.maxMessageSize!;
 
     this.storage = this.initializeStorage();
     this.roomManager = new RoomManager(this.storage);
     this.signalingHandler = new SignalingHandler(this.roomManager);
 
+    this.startPeriodicCleanup();
+
     if (this.config.debug) {
-      console.log("[AvesServer] Initialized with config:", this.config);
+      this.logDebug("[AvesServer] Initialized with config", {
+        config: this.config,
+      });
     }
   }
 
   private initializeStorage(): IDataStorage {
-    if (this.config.redis) {
-      let redisClient: Redis;
-
-      if (this.config.redis instanceof Redis) {
-        redisClient = this.config.redis;
-      } else {
-        const redisConfig = this.config.redis as RedisConfig;
-        redisClient = new Redis({
-          host: redisConfig.host || "localhost",
-          port: redisConfig.port || 6379,
-          password: redisConfig.password,
-          db: redisConfig.db || 0,
-        });
-      }
-
+    const redis = this.config.redis;
+    if (redis) {
+      const redisClient = isRedisClient(redis) ? redis : createRedisClient(redis);
       return new RedisStorage(redisClient);
     }
 
@@ -76,31 +117,61 @@ export class AvesServer {
    * Sets up message routing and connection lifecycle management
    * Requirements: 7.3
    */
-  handleConnection(ws: WebSocket): void {
+  handleConnection(ws: WebSocket, req?: IncomingMessage): void {
     if (this.config.debug) {
-      console.log("[AvesServer] New WebSocket connection");
+      this.logDebug("[AvesServer] New WebSocket connection");
     }
 
+    const clientKey = req?.socket?.remoteAddress ?? "unknown";
     this.connections.add(ws);
     let currentUserId: string | undefined;
 
     // Handle incoming messages
     ws.on("message", (data: Buffer) => {
+      // Rate limiting
+      if (!this.rateLimiter.consume(clientKey)) {
+        this.sendError(
+          ws,
+          new AvesError({
+            message: "Rate limit exceeded",
+            code: "SERVER_ERROR",
+            stage: "protocol",
+            retryable: true,
+          }),
+        );
+        return;
+      }
+
+      // Message size limit
+      if (data.byteLength > this.maxMessageSize) {
+        this.sendError(
+          ws,
+          new AvesError({
+            message: `Message exceeds maximum size of ${this.maxMessageSize} bytes`,
+            code: "INVALID_MESSAGE_FORMAT",
+            stage: "protocol",
+            retryable: false,
+          }),
+        );
+        return;
+      }
+
       try {
         const message = JSON.parse(data.toString());
 
         if (this.config.debug) {
-          console.log("[AvesServer] Received message:", message);
+          this.logDebug("[AvesServer] Received message", { message });
         }
 
         this.routeMessage(ws, message, currentUserId, (userId) => {
           currentUserId = userId;
         }).catch((error) => {
-          console.error("[AvesServer] Error handling message:", error);
+          this.logger.error("[AvesServer] Error handling message", { error });
+          this.sendError(ws, this.createRouteErrorPayload(error, message));
         });
       } catch (error) {
         if (this.config.debug) {
-          console.error("[AvesServer] Failed to parse message:", error);
+          this.logger.error("[AvesServer] Failed to parse message", { error });
         }
         this.sendError(
           ws,
@@ -117,7 +188,7 @@ export class AvesServer {
     // Handle connection close
     ws.on("close", () => {
       if (this.config.debug) {
-        console.log("[AvesServer] WebSocket connection closed");
+        this.logDebug("[AvesServer] WebSocket connection closed");
       }
 
       this.connections.delete(ws);
@@ -131,7 +202,7 @@ export class AvesServer {
 
     // Handle connection errors
     ws.on("error", (error) => {
-      console.error("[AvesServer] WebSocket error:", error);
+      this.logger.error("[AvesServer] WebSocket error", { error });
     });
   }
 
@@ -186,10 +257,9 @@ export class AvesServer {
       default: {
         const exhaustiveCheck: never = message;
         if (this.config.debug) {
-          console.warn(
-            "[AvesServer] Unknown message type:",
-            (exhaustiveCheck as { type: string }).type,
-          );
+          this.logger.warn("[AvesServer] Unknown message type", {
+            type: (exhaustiveCheck as { type: string }).type,
+          });
         }
         this.sendError(
           ws,
@@ -246,7 +316,7 @@ export class AvesServer {
     this.sendMessage(ws, response);
 
     if (this.config.debug) {
-      console.log(`[AvesServer] Room created: ${roomId}`, options);
+      this.logDebug("[AvesServer] Room created", { roomId, options });
     }
   }
 
@@ -366,7 +436,7 @@ export class AvesServer {
     await this.roomManager.broadcastToRoom(roomId, userJoinedMessage, userId);
 
     if (this.config.debug) {
-      console.log(`[AvesServer] User ${userId} joined room ${roomId}`);
+      this.logDebug("[AvesServer] User joined room", { userId, roomId });
     }
   }
 
@@ -386,7 +456,7 @@ export class AvesServer {
     const { userId } = message;
 
     if (!userId) {
-      console.warn("[AvesServer] Leave room message missing userId");
+      this.logger.warn("[AvesServer] Leave room message missing userId");
       return;
     }
 
@@ -452,7 +522,7 @@ export class AvesServer {
     await this.roomManager.broadcastToRoom(roomId, userLeftMessage);
 
     if (this.config.debug) {
-      console.log(`[AvesServer] User ${userId} left room ${roomId}`);
+      this.logDebug("[AvesServer] User left room", { userId, roomId });
     }
   }
 
@@ -473,6 +543,19 @@ export class AvesServer {
         "offer",
       ))
     ) {
+      return;
+    }
+
+    if (!this.signalingHandler.validateSignalingMessage(message)) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          "Rejected offer: invalid signaling payload",
+          "INVALID_MESSAGE",
+          "signaling",
+          false,
+        ),
+      );
       return;
     }
 
@@ -503,6 +586,19 @@ export class AvesServer {
       return;
     }
 
+    if (!this.signalingHandler.validateSignalingMessage(message)) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          "Rejected answer: invalid signaling payload",
+          "INVALID_MESSAGE",
+          "signaling",
+          false,
+        ),
+      );
+      return;
+    }
+
     await this.signalingHandler.handleAnswer(
       message.fromId,
       message.targetId,
@@ -527,6 +623,19 @@ export class AvesServer {
         "ice-candidate",
       ))
     ) {
+      return;
+    }
+
+    if (!this.signalingHandler.validateSignalingMessage(message)) {
+      this.sendError(
+        ws,
+        this.createErrorPayload(
+          "Rejected ice-candidate: invalid signaling payload",
+          "INVALID_MESSAGE",
+          "signaling",
+          false,
+        ),
+      );
       return;
     }
 
@@ -678,27 +787,51 @@ export class AvesServer {
   }
 
   /**
+   * Get server health status including connections, rooms, and uptime.
+   */
+  async getHealth(): Promise<HealthStatus> {
+    const rooms = await this.roomManager.getAllRooms();
+    const isRedis = this.config.redis !== undefined;
+    return {
+      connections: this.connections.size,
+      rooms: rooms.length,
+      storage: isRedis ? "redis" : "memory",
+      roomTimeout: this.config.roomTimeout ?? 0,
+      uptime: Date.now() - this.startTime,
+    };
+  }
+
+  /**
    * Close the server and clean up resources
    */
   close(): void {
+    if (this.cleanupTimer !== null) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+
     if (this.config.debug) {
-      console.log("[AvesServer] Closing server");
+      this.logDebug("[AvesServer] Closing server");
     }
 
     for (const ws of this.connections) {
-      ws.close();
+      try {
+        ws.close();
+      } catch (_error) {
+        // Connection may already be closing/closed — ignore.
+      }
     }
     this.connections.clear();
 
     const storageCloseResult = this.storage.close?.();
     if (storageCloseResult instanceof Promise) {
       void storageCloseResult.catch((error) => {
-        console.error("[AvesServer] Failed to close storage:", error);
+        this.logger.error("[AvesServer] Failed to close storage", { error });
       });
     }
 
     if (this.config.debug) {
-      console.log("[AvesServer] Server closed");
+      this.logDebug("[AvesServer] Server closed");
     }
   }
 
@@ -710,7 +843,7 @@ export class AvesServer {
       try {
         ws.send(JSON.stringify(message));
       } catch (error) {
-        console.error("[AvesServer] Failed to send message:", error);
+        this.logger.error("[AvesServer] Failed to send message", { error });
       }
     }
   }
@@ -734,11 +867,160 @@ export class AvesServer {
     };
   }
 
-  private sendError(ws: WebSocket, error: SignalingErrorPayload): void {
+  private sendError(
+    ws: WebSocket,
+    error: SignalingErrorPayload | AvesError,
+  ): void {
+    const payload: SignalingErrorPayload =
+      error instanceof AvesError
+        ? {
+            message: error.message,
+            code: error.code as SignalingErrorCode,
+            stage: error.stage,
+            retryable: error.retryable,
+            requestId: error.requestId,
+          }
+        : error;
+
     const message: OutboundSignalingMessage = {
       type: "error",
-      ...error,
+      ...payload,
     };
     this.sendMessage(ws, message);
   }
+
+  private createRouteErrorPayload(
+    error: unknown,
+    message: unknown,
+  ): SignalingErrorPayload {
+    const requestId = this.extractRequestId(message);
+
+    if (error instanceof AvesError) {
+      return {
+        message: error.message,
+        code: error.code as SignalingErrorCode,
+        stage: error.stage,
+        retryable: error.retryable,
+        requestId: error.requestId ?? requestId,
+      };
+    }
+
+    return this.createErrorPayload(
+      errorMessage(error),
+      "SERVER_ERROR",
+      "server",
+      true,
+      requestId,
+    );
+  }
+
+  private extractRequestId(message: unknown): string | undefined {
+    if (!message || typeof message !== "object") {
+      return undefined;
+    }
+
+    const requestId = (message as Record<string, unknown>).requestId;
+    return typeof requestId === "string" ? requestId : undefined;
+  }
+
+  /**
+   * Periodically clean up dead rooms and prune rate limiter buckets.
+   */
+  private startPeriodicCleanup(): void {
+    this.cleanupTimer = setInterval(async () => {
+      this.rateLimiter.prune();
+
+      if (!this.config.roomTimeout || this.config.roomTimeout <= 0) {
+        return;
+      }
+
+      try {
+        const rooms = await this.roomManager.getAllRooms();
+        for (const room of rooms) {
+          if (room.participantCount === 0) {
+            const age = Date.now() - room.createdAt;
+            if (age > this.config.roomTimeout) {
+              await this.storage.deleteRoom?.(room.id);
+              if (this.config.debug) {
+                this.logDebug("[AvesServer] Cleaned up empty room", {
+                  roomId: room.id,
+                  idleMs: age,
+                });
+              }
+            }
+          }
+        }
+      } catch (error) {
+        if (this.config.debug) {
+          this.logger.warn("[AvesServer] Room cleanup failed", { error });
+        }
+      }
+    }, 60_000);
+  }
+
+  private logDebug(
+    message: string,
+    context?: Record<string, unknown>,
+  ): void {
+    if (this.config.debug) {
+      this.logger.debug(message, context);
+    }
+  }
+}
+
+type RedisConstructor = new (options: RedisConfig) => Redis;
+type RedisModule =
+  | RedisConstructor
+  | {
+      Redis?: RedisConstructor;
+      default?: RedisConstructor;
+    };
+
+function isRedisClient(value: Redis | RedisConfig): value is Redis {
+  const candidate = value as Partial<Redis>;
+  return (
+    typeof candidate.duplicate === "function" &&
+    typeof candidate.hgetall === "function" &&
+    typeof candidate.hset === "function"
+  );
+}
+
+function createRedisClient(redisConfig: RedisConfig): Redis {
+  const RedisClient = loadRedisConstructor();
+  return new RedisClient({
+    host: redisConfig.host || "localhost",
+    port: redisConfig.port || 6379,
+    password: redisConfig.password,
+    db: redisConfig.db || 0,
+  });
+}
+
+function loadRedisConstructor(): RedisConstructor {
+  try {
+    const redisModule = require("ioredis") as RedisModule;
+
+    if (typeof redisModule === "function") {
+      return redisModule;
+    }
+
+    const RedisClient = redisModule.Redis ?? redisModule.default;
+    if (RedisClient) {
+      return RedisClient;
+    }
+  } catch (error) {
+    throw new AvesError({
+      message: "Redis storage requires the optional ioredis dependency",
+      code: "SERVER_ERROR",
+      stage: "server",
+      retryable: false,
+      cause: error,
+    });
+  }
+
+  throw new AvesError({
+    message: "Unable to load Redis constructor from ioredis",
+    code: "SERVER_ERROR",
+    stage: "server",
+    retryable: false,
+  });
 }

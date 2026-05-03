@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import { WebSocket } from "ws";
 import { RoomManager } from "../../core/RoomManager";
 import { RedisStorage } from "../../storage/RedisStorage";
+import { Room } from "../../types/types";
 
 class MockWebSocket {
   readyState = WebSocket.OPEN;
@@ -78,7 +79,10 @@ class FakeRedis extends EventEmitter {
     return existing instanceof Set && existing.has(member) ? 1 : 0;
   }
 
-  async set(key: string, value: string): Promise<"OK"> {
+  async set(key: string, value: string, mode?: "NX"): Promise<"OK" | null> {
+    if (mode === "NX" && this.backend.store.has(key)) {
+      return null;
+    }
     this.backend.store.set(key, value);
     return "OK";
   }
@@ -141,6 +145,17 @@ class FakeRedis extends EventEmitter {
 describe("RedisStorage", () => {
   const flushAsync = () => new Promise((resolve) => setImmediate(resolve));
 
+  function createStorage(prefix = "aves"): {
+    backend: FakeRedisBackend;
+    redis: FakeRedis;
+    storage: RedisStorage;
+  } {
+    const backend = new FakeRedisBackend();
+    const redis = new FakeRedis(backend);
+    const storage = new RedisStorage(redis as unknown as any, prefix);
+    return { backend, redis, storage };
+  }
+
   it("forwards signaling messages across storage instances", async () => {
     const backend = new FakeRedisBackend();
     const redisA = new FakeRedis(backend);
@@ -178,5 +193,167 @@ describe("RedisStorage", () => {
 
     storageA.close();
     storageB.close();
+  });
+
+  it("persists room metadata, user bindings, and participant lifecycle", async () => {
+    const { storage } = createStorage();
+    const socket = new MockWebSocket() as unknown as WebSocket;
+    const room: Room = {
+      id: "room-1",
+      name: "Launch Room",
+      maxCapacity: 4,
+      password: "secret",
+      participants: new Map(),
+      createdAt: 123,
+    };
+
+    await storage.setRoom("room-1", room);
+    await storage.setRoom("room-1", { ...room, name: "Updated Room" });
+
+    await expect(storage.roomExists("room-1")).resolves.toBe(true);
+    await expect(storage.getRoom("room-1")).resolves.toEqual(
+      expect.objectContaining({
+        id: "room-1",
+        name: "Updated Room",
+        maxCapacity: 4,
+        password: "secret",
+        createdAt: 123,
+      }),
+    );
+    await expect(storage.getAllRooms()).resolves.toHaveLength(1);
+
+    await expect(storage.setUserRoom("user-1", "room-1")).resolves.toBe(true);
+    await expect(storage.setUserRoom("user-1", "room-2")).resolves.toBe(false);
+    await expect(storage.getUserRoom("user-1")).resolves.toBe("room-1");
+
+    await expect(
+      storage.setParticipant("room-1", "user-1", {
+        userId: "user-1",
+        userName: "Alice",
+        socket,
+      }),
+    ).resolves.toBe(true);
+    await expect(storage.getParticipant("room-1", "user-1")).resolves.toEqual(
+      expect.objectContaining({
+        userId: "user-1",
+        userName: "Alice",
+        socket,
+      }),
+    );
+    await expect(storage.getAllParticipants("room-1")).resolves.toEqual(
+      new Map([
+        [
+          "user-1",
+          expect.objectContaining({
+            userId: "user-1",
+            userName: "Alice",
+            socket,
+          }),
+        ],
+      ]),
+    );
+
+    await storage.deleteParticipant("room-1", "missing-user");
+    await storage.deleteParticipant("room-1", "user-1");
+    await expect(storage.getParticipant("room-1", "user-1")).resolves.toBeNull();
+    await expect(storage.getAllParticipants("room-1")).resolves.toEqual(new Map());
+
+    await storage.deleteUserRoom("missing-user");
+    await storage.deleteUserRoom("user-1");
+    await expect(storage.getUserRoom("user-1")).resolves.toBeNull();
+
+    await storage.deleteRoom("missing-room");
+    await storage.deleteRoom("room-1");
+    await expect(storage.roomExists("room-1")).resolves.toBe(false);
+    await expect(storage.getRoom("room-1")).resolves.toBeNull();
+
+    storage.close();
+    storage.close();
+  });
+
+  it("honors before-change cancellation for Redis mutations", async () => {
+    const { storage } = createStorage();
+    const socket = new MockWebSocket() as unknown as WebSocket;
+    const room: Room = {
+      id: "room-cancel",
+      participants: new Map(),
+      createdAt: 1,
+    };
+
+    storage.addListener({
+      onBeforeChange: jest.fn().mockResolvedValue(false),
+    });
+
+    await storage.setRoom("room-cancel", room);
+    await expect(storage.getRoom("room-cancel")).resolves.toBeNull();
+    await expect(storage.setUserRoom("user-cancel", "room-cancel")).resolves.toBe(
+      false,
+    );
+    await expect(
+      storage.setParticipant("room-cancel", "user-cancel", {
+        userId: "user-cancel",
+        userName: "Cancelled",
+        socket,
+      }),
+    ).resolves.toBe(false);
+
+    storage.clearListeners();
+    await storage.setRoom("room-cancel", room);
+    await storage.setUserRoom("user-cancel", "room-cancel");
+    await storage.setParticipant("room-cancel", "user-cancel", {
+      userId: "user-cancel",
+      userName: "Cancelled",
+      socket,
+    });
+
+    storage.clearListeners();
+    storage.addListener({
+      onBeforeChange: jest.fn().mockResolvedValue(false),
+    });
+
+    await storage.deleteRoom("room-cancel");
+    await expect(storage.roomExists("room-cancel")).resolves.toBe(true);
+    await storage.deleteUserRoom("user-cancel");
+    await expect(storage.getUserRoom("user-cancel")).resolves.toBe("room-cancel");
+    await storage.deleteParticipant("room-cancel", "user-cancel");
+    await expect(storage.getParticipant("room-cancel", "user-cancel")).resolves.toEqual(
+      expect.objectContaining({ userId: "user-cancel" }),
+    );
+
+    storage.close();
+  });
+
+  it("filters unavailable Redis participants and malformed pipeline results", async () => {
+    const { redis, storage } = createStorage();
+    const instanceId = (storage as any).instanceId;
+
+    await redis.hset("aves:room:room-remote", {
+      id: "room-remote",
+      createdAt: "1",
+    });
+    await redis.sadd("aves:rooms", "room-remote");
+    await redis.sadd(
+      "aves:room:room-remote:participants",
+      "same-instance",
+      "missing-user-id",
+    );
+    await redis.hset("aves:room:room-remote:participant:same-instance", {
+      userId: "same-instance",
+      userName: "Same Instance",
+      instanceId,
+    });
+    await redis.hset("aves:room:room-remote:participant:missing-user-id", {
+      userName: "Broken",
+      instanceId: "other-instance",
+    } as Record<string, string>);
+
+    await expect(
+      storage.getParticipant("room-remote", "same-instance"),
+    ).resolves.toBeNull();
+    await expect(storage.getAllParticipants("room-remote")).resolves.toEqual(
+      new Map(),
+    );
+
+    storage.close();
   });
 });

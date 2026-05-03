@@ -1,4 +1,4 @@
-import { Redis } from "ioredis";
+import type { Redis } from "ioredis";
 import { Room, ParticipantInfo } from "../types/types";
 import { WebSocket } from "ws";
 import { BaseStorage } from "./BaseStorage";
@@ -179,14 +179,24 @@ export class RedisStorage extends BaseStorage {
     return (await this.redis.sismember(this.key("rooms"), roomId)) === 1;
   }
 
-  async setUserRoom(userId: string, roomId: string): Promise<void> {
+  async setUserRoom(userId: string, roomId: string): Promise<boolean> {
     const event = this.createUserBindRoomEvent(userId, roomId);
     const shouldProceed = await this.emitBeforeChange(event);
-    if (!shouldProceed) return;
+    if (!shouldProceed) return false;
 
-    await this.redis.set(this.key("user", userId, "room"), roomId);
+    // Use SET NX for atomic check-and-set across instances
+    const result = await this.redis.set(
+      this.key("user", userId, "room"),
+      roomId,
+      "NX",
+    );
+
+    if (result !== "OK") {
+      return false;
+    }
 
     await this.emitAfterChange(event);
+    return true;
   }
 
   async getUserRoom(userId: string): Promise<string | null> {
@@ -211,12 +221,12 @@ export class RedisStorage extends BaseStorage {
     roomId: string,
     userId: string,
     participant: ParticipantInfo,
-  ): Promise<void> {
+  ): Promise<boolean> {
     await this.subscriptionReady;
 
     const event = this.createParticipantJoinEvent(roomId, userId, participant);
     const shouldProceed = await this.emitBeforeChange(event);
-    if (!shouldProceed) return;
+    if (!shouldProceed) return false;
 
     const participantData = {
       userId: participant.userId,
@@ -231,12 +241,15 @@ export class RedisStorage extends BaseStorage {
     this.socketMap.set(userId, participant.socket);
 
     await this.emitAfterChange(event);
+    return true;
   }
 
   async getParticipant(
     roomId: string,
     userId: string,
   ): Promise<ParticipantInfo | null> {
+    await this.subscriptionReady;
+
     const participantData = (await this.redis.hgetall(
       this.key("room", roomId, "participant", userId),
     )) as unknown as RedisParticipantRecord;
@@ -277,6 +290,8 @@ export class RedisStorage extends BaseStorage {
   async getAllParticipants(
     roomId: string,
   ): Promise<Map<string, ParticipantInfo>> {
+    await this.subscriptionReady;
+
     const participantIds = await this.redis.smembers(
       this.key("room", roomId, "participants"),
     );

@@ -157,6 +157,29 @@ describe("RoomManager", () => {
 
       expect(result).toBe(false);
     });
+
+    it("should roll back user-room binding when participant storage is cancelled", async () => {
+      const storage = new MemoryStorage();
+      storage.addListener({
+        onBeforeChange: (event) => event.type !== "participant:join",
+      });
+      const managerWithCancellableStorage = new RoomManager(storage);
+      const roomId = await managerWithCancellableStorage.createRoom();
+      const socket = new MockWebSocket() as unknown as WebSocket;
+
+      const result = await managerWithCancellableStorage.joinRoom(
+        roomId,
+        "user1",
+        "Alice",
+        socket,
+      );
+
+      expect(result).toBe(false);
+      expect(await storage.getUserRoom("user1")).toBeNull();
+      expect(
+        await managerWithCancellableStorage.getRoomParticipants(roomId),
+      ).toHaveLength(0);
+    });
   });
 
   describe("Message Broadcasting", () => {

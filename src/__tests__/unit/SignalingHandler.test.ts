@@ -66,60 +66,6 @@ describe("SignalingHandler", () => {
     });
   });
 
-  describe("Message Validation", () => {
-    it("should validate offer messages", () => {
-      const validOffer = {
-        type: "offer",
-        fromId: "user1",
-        targetId: "user2",
-        offer: { type: "offer", sdp: "test-sdp" },
-      };
-      expect(signalingHandler.validateSignalingMessage(validOffer)).toBe(true);
-    });
-
-    it("should validate answer messages", () => {
-      const validAnswer = {
-        type: "answer",
-        fromId: "user1",
-        targetId: "user2",
-        answer: { type: "answer", sdp: "test-sdp" },
-      };
-      expect(signalingHandler.validateSignalingMessage(validAnswer)).toBe(true);
-    });
-
-    it("should validate ice-candidate messages", () => {
-      const validCandidate = {
-        type: "ice-candidate",
-        fromId: "user1",
-        targetId: "user2",
-        candidate: { candidate: "test-candidate" },
-      };
-      expect(signalingHandler.validateSignalingMessage(validCandidate)).toBe(
-        true,
-      );
-    });
-
-    it("should reject invalid messages", () => {
-      expect(signalingHandler.validateSignalingMessage(null)).toBe(false);
-      expect(signalingHandler.validateSignalingMessage({})).toBe(false);
-      expect(
-        signalingHandler.validateSignalingMessage({ type: "unknown" }),
-      ).toBe(false);
-    });
-
-    it("should reject messages with missing fields", () => {
-      const invalidOffer = {
-        type: "offer",
-        fromId: "user1",
-        // missing targetId
-        offer: { type: "offer", sdp: "test-sdp" },
-      };
-      expect(signalingHandler.validateSignalingMessage(invalidOffer)).toBe(
-        false,
-      );
-    });
-  });
-
   describe("Error Handling", () => {
     it("should handle forwarding to non-existent user", async () => {
       const offer = { type: "offer" as const, sdp: "test-sdp" };
@@ -191,6 +137,160 @@ describe("SignalingHandler", () => {
       await expect(
         signalingHandler.handleIceCandidate("user1", "non-existent", candidate),
       ).resolves.not.toThrow();
+    });
+  });
+
+  describe("Message Validation", () => {
+    it("should reject non-object messages and messages with invalid peer ids", () => {
+      expect(signalingHandler.validateSignalingMessage(null)).toBe(false);
+      expect(signalingHandler.validateSignalingMessage("offer")).toBe(false);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "offer",
+          fromId: "",
+          targetId: "user2",
+          offer: { type: "offer", sdp: "sdp" },
+        }),
+      ).toBe(false);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "offer",
+          fromId: "user1",
+          targetId: "   ",
+          offer: { type: "offer", sdp: "sdp" },
+        }),
+      ).toBe(false);
+    });
+
+    it("should validate offer, answer, ICE candidate, and unknown signaling messages", () => {
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "offer",
+          fromId: "user1",
+          targetId: "user2",
+          offer: { type: "offer", sdp: "offer-sdp" },
+        }),
+      ).toBe(true);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "answer",
+          fromId: "user2",
+          targetId: "user1",
+          answer: { type: "answer", sdp: "answer-sdp" },
+        }),
+      ).toBe(true);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "ice-candidate",
+          fromId: "user1",
+          targetId: "user2",
+          candidate: { candidate: "candidate-data" },
+        }),
+      ).toBe(true);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "offer",
+          fromId: "user1",
+          targetId: "user2",
+          offer: { type: "answer", sdp: "wrong-type" },
+        }),
+      ).toBe(false);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "unknown",
+          fromId: "user1",
+          targetId: "user2",
+        }),
+      ).toBe(false);
+    });
+
+    it("should reject malformed descriptions and invalid ICE metadata", () => {
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "offer",
+          fromId: "user1",
+          targetId: "user2",
+          offer: null,
+        }),
+      ).toBe(false);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "answer",
+          fromId: "user2",
+          targetId: "user1",
+          answer: "answer-sdp",
+        }),
+      ).toBe(false);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "ice-candidate",
+          fromId: "user1",
+          targetId: "user2",
+          candidate: null,
+        }),
+      ).toBe(false);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "ice-candidate",
+          fromId: "user1",
+          targetId: "user2",
+          candidate: {
+            candidate: "candidate-data",
+            sdpMid: null,
+            sdpMLineIndex: 0,
+          },
+        }),
+      ).toBe(true);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "ice-candidate",
+          fromId: "user1",
+          targetId: "user2",
+          candidate: { candidate: "candidate-data", sdpMid: 7 },
+        }),
+      ).toBe(false);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "ice-candidate",
+          fromId: "user1",
+          targetId: "user2",
+          candidate: { candidate: "candidate-data", sdpMLineIndex: 1.5 },
+        }),
+      ).toBe(false);
+      expect(
+        signalingHandler.validateSignalingMessage({
+          type: "ice-candidate",
+          fromId: "user1",
+          targetId: "user2",
+          candidate: { candidate: "candidate-data", sdpMLineIndex: "0" },
+        }),
+      ).toBe(false);
+    });
+
+    it("should emit structured errors for invalid signaling payloads", async () => {
+      const errorListener = jest.fn();
+      signalingHandler.onError(errorListener);
+
+      await signalingHandler.handleOffer("user1", "user2", {
+        type: "offer",
+        sdp: "",
+      });
+      await signalingHandler.handleAnswer("user2", "user1", {
+        type: "answer",
+        sdp: "",
+      });
+      await signalingHandler.handleIceCandidate("user1", "user2", {
+        candidate: "",
+      });
+
+      expect(errorListener).toHaveBeenCalledTimes(3);
+      expect(errorListener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "INVALID_MESSAGE",
+          stage: "signaling",
+          retryable: false,
+        }),
+      );
     });
   });
 });

@@ -42,13 +42,18 @@ export class MemoryStorage extends BaseStorage {
     return this.rooms.has(roomId);
   }
 
-  async setUserRoom(userId: string, roomId: string): Promise<void> {
+  async setUserRoom(userId: string, roomId: string): Promise<boolean> {
+    if (this.userToRoom.has(userId)) {
+      return false;
+    }
+
     const event = this.createUserBindRoomEvent(userId, roomId);
     const shouldProceed = await this.emitBeforeChange(event);
-    if (!shouldProceed) return;
+    if (!shouldProceed) return false;
 
     this.userToRoom.set(userId, roomId);
     await this.emitAfterChange(event);
+    return true;
   }
 
   async getUserRoom(userId: string): Promise<string | null> {
@@ -71,16 +76,17 @@ export class MemoryStorage extends BaseStorage {
     roomId: string,
     userId: string,
     participant: ParticipantInfo,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const room = this.rooms.get(roomId);
-    if (!room) return;
+    if (!room) return false;
 
     const event = this.createParticipantJoinEvent(roomId, userId, participant);
     const shouldProceed = await this.emitBeforeChange(event);
-    if (!shouldProceed) return;
+    if (!shouldProceed) return false;
 
     room.participants.set(userId, participant);
     await this.emitAfterChange(event);
+    return true;
   }
 
   async getParticipant(

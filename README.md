@@ -2,15 +2,21 @@
 
 轻量级 Node.js WebRTC 信令服务器库。负责房间管理和信令转发，不传输 WebRTC 媒体数据。支持可插拔存储（内存 / Redis）和多实例部署。
 
+当前版本：`0.3.0`
+
 ## 特性
 
 - 基于房间的信令架构
 - 信令消息鉴权：防伪造（fromId 校验）、跨房间保护
 - 房间密码与容量限制
+- Token bucket rate limit 与最大消息体限制
 - 可插拔存储：MemoryStorage（默认）、RedisStorage（可选，支持多实例 pub/sub）
 - 存储事件钩子：before/after change 回调，支持取消操作
 - 自动清理空房间和断开连接
+- 结构化 `AvesError` 与 JSON error payload，支持 requestId 透传
+- 健康检查：连接数、房间数、存储类型、运行时间
 - 完整 TypeScript 类型定义
+- CJS / ESM / TypeScript types 发布入口
 
 ## 安装
 
@@ -43,15 +49,14 @@ console.log("信令服务器运行在 ws://localhost:8080");
 ### 使用 Redis 存储
 
 ```typescript
-import { AvesServer, RedisStorage } from "@yrzhao/aves-node";
+import { AvesServer } from "@yrzhao/aves-node";
 
-const storage = new RedisStorage({
-  host: "127.0.0.1",
-  port: 6379,
-  instanceId: "server-1", // 每个实例必须唯一
+const avesServer = new AvesServer({
+  redis: {
+    host: "127.0.0.1",
+    port: 6379,
+  },
 });
-
-const avesServer = new AvesServer({ storage });
 ```
 
 RedisStorage 使用 Redis pub/sub 实现跨实例信令转发，适用于多服务器部署。
@@ -59,9 +64,10 @@ RedisStorage 使用 Redis pub/sub 实现跨实例信令转发，适用于多服�
 ### 存储事件钩子
 
 ```typescript
-import { AvesServer, MemoryStorage } from "@yrzhao/aves-node";
+import { AvesServer } from "@yrzhao/aves-node";
 
-const storage = new MemoryStorage();
+const avesServer = new AvesServer();
+const storage = avesServer.getStorage();
 
 storage.addListener({
   onBeforeChange: (event) => {
@@ -73,8 +79,6 @@ storage.addListener({
     // 持久化到数据库等
   },
 });
-
-const avesServer = new AvesServer({ storage });
 ```
 
 支持的事件类型：`room:create`、`room:update`、`room:delete`、`participant:join`、`participant:leave`、`user:bindRoom`、`user:unbindRoom`
@@ -95,8 +99,8 @@ wss.on("connection", (ws) => {
   avesServer.handleConnection(ws);
 });
 
-app.get("/api/rooms", (req, res) => {
-  res.json(avesServer.getAllRooms());
+app.get("/api/rooms", async (req, res) => {
+  res.json(await avesServer.getAllRooms());
 });
 ```
 
@@ -104,8 +108,20 @@ app.get("/api/rooms", (req, res) => {
 
 ```typescript
 interface AvesServerConfig {
-  storage?: IDataStorage;  // 存储实现（默认：MemoryStorage）
   debug?: boolean;         // 调试日志（默认：false）
+  roomTimeout?: number;    // 空房间自动清理延迟 ms（默认：0，永不按计时器清理）
+  redis?: Redis | RedisConfig;
+  rateLimit?: {
+    maxTokens?: number;    // 突发消息数（默认：60）
+    refillRate?: number;   // 每秒补充令牌数（默认：10）
+  };
+  maxMessageSize?: number; // 最大 WebSocket 消息体字节数（默认：65536）
+  logger?: {
+    debug?: (message: string, context?: Record<string, unknown>) => void;
+    info?: (message: string, context?: Record<string, unknown>) => void;
+    warn?: (message: string, context?: Record<string, unknown>) => void;
+    error?: (message: string, context?: Record<string, unknown>) => void;
+  };
 }
 ```
 
@@ -113,7 +129,7 @@ interface AvesServerConfig {
 
 ### 连接管理
 
-**`handleConnection(ws: WebSocket): void`**
+**`handleConnection(ws: WebSocket, req?: IncomingMessage): void`**
 
 处理新 WebSocket 连接。自动处理消息解析、房间管理、信令转发和断开清理。
 
@@ -121,9 +137,11 @@ interface AvesServerConfig {
 
 | 方法 | 返回值 | 说明 |
 |------|--------|------|
-| `getRoomInfo(roomId)` | `RoomInfo \| null` | 房间信息 |
-| `getParticipantCount(roomId)` | `number` | 参与者数量 |
-| `getAllRooms()` | `RoomInfo[]` | 所有活动房间 |
+| `getRoomInfo(roomId)` | `Promise<RoomInfo \| null>` | 房间信息 |
+| `getParticipantCount(roomId)` | `Promise<number>` | 参与者数量 |
+| `getAllRooms()` | `Promise<RoomInfo[]>` | 所有活动房间 |
+| `getHealth()` | `Promise<HealthStatus>` | 连接数、房间数、存储类型、roomTimeout、uptime |
+| `getStorage()` | `IDataStorage` | 当前存储实例，用于事件钩子或高级集成 |
 
 ### 生命周期
 
@@ -140,11 +158,13 @@ interface AvesServerConfig {
 | type | 必需字段 | 说明 |
 |------|----------|------|
 | `create-room` | — | 创建房间 |
-| `join-room` | `roomId`, `userName` | 加入房间（`password` 可选） |
+| `join-room` | `roomId`, `userName` | 加入房间（`userId`、`password` 可选） |
 | `leave-room` | `userId` | 离开房间 |
 | `offer` | `fromId`, `targetId`, `offer` | WebRTC offer |
 | `answer` | `fromId`, `targetId`, `answer` | WebRTC answer |
 | `ice-candidate` | `fromId`, `targetId`, `candidate` | ICE candidate |
+
+`create-room`、`join-room`、`leave-room` 支持 `requestId`，服务端会在响应或错误中原样返回，方便客户端关联 pending request。
 
 ### 服务器 → 客户端
 
@@ -157,6 +177,18 @@ interface AvesServerConfig {
 | `user-left` | 广播：用户离开 |
 | `offer` / `answer` / `ice-candidate` | 信令转发 |
 | `error` | 错误消息 |
+
+错误消息包含结构化字段：
+
+```typescript
+interface SignalingErrorPayload {
+  message: string;
+  code: SignalingErrorCode;
+  stage: "protocol" | "room" | "signaling" | "transport" | "server";
+  retryable: boolean;
+  requestId?: string;
+}
+```
 
 ### 鉴权
 
@@ -171,6 +203,9 @@ interface AvesServerConfig {
 ```typescript
 interface RoomInfo {
   id: string;
+  name?: string;
+  maxCapacity?: number;
+  hasPassword: boolean;
   participantCount: number;
   createdAt: number;
 }
@@ -184,6 +219,14 @@ interface CreateRoomOptions {
   name?: string;           // 房间名称
   maxCapacity?: number;    // 最大容量
   password?: string;       // 房间密码
+}
+
+interface HealthStatus {
+  connections: number;
+  rooms: number;
+  storage: "memory" | "redis";
+  roomTimeout: number;
+  uptime: number;
 }
 ```
 
@@ -200,13 +243,13 @@ interface IDataStorage {
   deleteRoom(roomId: string): Promise<void>;
   getAllRooms(): Promise<Room[]>;
   roomExists(roomId: string): Promise<boolean>;
-  setUserRoom(userId: string, roomId: string): Promise<void>;
+  setUserRoom(userId: string, roomId: string): Promise<boolean>;
   getUserRoom(userId: string): Promise<string | null>;
   deleteUserRoom(userId: string): Promise<void>;
-  setParticipant(roomId: string, participant: Participant): Promise<void>;
+  setParticipant(roomId: string, userId: string, participant: ParticipantInfo): Promise<boolean>;
   getParticipant(roomId: string, userId: string): Promise<Participant | null>;
   deleteParticipant(roomId: string, userId: string): Promise<void>;
-  getAllParticipants(roomId: string): Promise<Participant[]>;
+  getAllParticipants(roomId: string): Promise<Map<string, ParticipantInfo>>;
   close(): Promise<void>;
 }
 ```
@@ -220,14 +263,28 @@ interface IDataStorage {
 基于 Redis 的存储实现。每个实例通过唯一 `instanceId` 订阅自己的信令通道，使用 pub/sub 进行跨实例消息投递。
 
 ```typescript
-const storage = new RedisStorage({
+const avesServer = new AvesServer({
+  redis: {
+    host: "127.0.0.1",
+    port: 6379,
+    password: process.env.REDIS_PASSWORD,
+    db: 0,
+  },
+});
+```
+
+也可以传入预配置的 `ioredis` 实例：
+
+```typescript
+import Redis from "ioredis";
+import { RedisStorage } from "@yrzhao/aves-node";
+
+const redis = new Redis({
   host: "127.0.0.1",
   port: 6379,
-  password?: string,
-  db?: number,
-  keyPrefix?: string,    // 默认 "aves"
-  instanceId: "server-1",
 });
+
+const storage = new RedisStorage(redis, "aves");
 ```
 
 ### BaseStorage
@@ -236,9 +293,12 @@ const storage = new RedisStorage({
 
 ## 性能
 
-- 单实例适合中小型部署
-- 广播复杂度 O(n)，n 为房间参与者数
-- 连接上限取决于 Node.js 和操作系统（通常 10,000+ 并发）
+- 发布包仅包含 `dist`、`README.md`、`LICENSE` 和 `package.json`
+- 当前 dry-run tarball 约 25 KiB，解包后约 175 KiB
+- 单实例适合中小型部署；RedisStorage 可用于多实例横向扩展
+- 房间内广播复杂度 O(n)，n 为房间参与者数；信令服务器不转发媒体流
+- 默认 `rateLimit` 为 60 个突发 token、每秒补 10 个 token；默认 `maxMessageSize` 为 64 KiB
+- 实际连接上限取决于 Node.js、操作系统 fd 限制、负载均衡和 Redis 延迟
 
 ## 许可证
 

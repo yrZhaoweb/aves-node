@@ -1,6 +1,6 @@
 // Shared types for aves-node
 import { WebSocket } from "ws";
-import { Redis } from "ioredis";
+import type { Redis } from "ioredis";
 
 export interface Participant {
   id: string;
@@ -49,8 +49,25 @@ export interface RedisConfig {
 
 export interface AvesServerConfig {
   debug?: boolean;
+  /** Milliseconds before an empty room is automatically deleted. 0 = never. */
   roomTimeout?: number;
   redis?: Redis | RedisConfig;
+  /** Token-bucket rate limiting configuration. */
+  rateLimit?: {
+    maxTokens?: number;
+    refillRate?: number;
+  };
+  /** Maximum incoming WebSocket message size in bytes. Default 65536. */
+  maxMessageSize?: number;
+  /** Optional structured logger for production observability. */
+  logger?: AvesLogger;
+}
+
+export interface AvesLogger {
+  debug?: (message: string, context?: Record<string, unknown>) => void;
+  info?: (message: string, context?: Record<string, unknown>) => void;
+  warn?: (message: string, context?: Record<string, unknown>) => void;
+  error?: (message: string, context?: Record<string, unknown>) => void;
 }
 
 export interface RoomInfo {
@@ -60,6 +77,20 @@ export interface RoomInfo {
   hasPassword: boolean;
   participantCount: number;
   createdAt: number;
+}
+
+/** Server health status returned by AvesServer.getHealth(). */
+export interface HealthStatus {
+  /** Number of active WebSocket connections. */
+  connections: number;
+  /** Total number of rooms (including empty ones not yet cleaned up). */
+  rooms: number;
+  /** Storage backend type. */
+  storage: "memory" | "redis";
+  /** Configured room timeout in milliseconds. 0 = never. */
+  roomTimeout: number;
+  /** Server uptime in milliseconds since construction. */
+  uptime: number;
 }
 
 // Internal types
