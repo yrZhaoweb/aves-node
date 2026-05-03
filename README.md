@@ -1,6 +1,6 @@
 # Aves Node
 
-轻量级 Node.js WebRTC 信令服务器库。负责房间管理和信令转发，不传输 WebRTC 媒体数据。支持可插拔存储（内存 / Redis）和多实例部署。
+轻量级 Node.js WebRTC 信令服务器库。负责房间管理和信令转发，不传输 WebRTC 媒体数据。支持可插拔存储（内存 / Redis / MongoDB）和多实例部署。
 
 当前版本：`0.3.0`
 
@@ -10,7 +10,7 @@
 - 信令消息鉴权：防伪造（fromId 校验）、跨房间保护
 - 房间密码与容量限制
 - Token bucket rate limit 与最大消息体限制
-- 可插拔存储：MemoryStorage（默认）、RedisStorage（可选，支持多实例 pub/sub）
+- 可插拔存储：MemoryStorage（默认）、RedisStorage（可选，支持多实例 pub/sub）、MongoStorage（可选，适合会话状态持久化）
 - 存储事件钩子：before/after change 回调，支持取消操作
 - 自动清理空房间和断开连接
 - 结构化 `AvesError` 与 JSON error payload，支持 requestId 透传
@@ -28,6 +28,12 @@ npm install @yrzhao/aves-node ws
 
 ```bash
 npm install ioredis
+```
+
+如需 MongoDB 存储，额外安装 `mongodb`：
+
+```bash
+npm install mongodb
 ```
 
 ## 快速开始
@@ -60,6 +66,39 @@ const avesServer = new AvesServer({
 ```
 
 RedisStorage 使用 Redis pub/sub 实现跨实例信令转发，适用于多服务器部署。
+
+### 使用 MongoDB 存储
+
+```typescript
+import { AvesServer } from "@yrzhao/aves-node";
+
+const avesServer = new AvesServer({
+  mongo: {
+    uri: process.env.MONGODB_URI,
+    dbName: "aves",
+    collectionPrefix: "aves",
+  },
+});
+```
+
+也可以传入预配置的 `MongoClient` 或 `Db`：
+
+```typescript
+import { MongoClient } from "mongodb";
+import { AvesServer } from "@yrzhao/aves-node";
+
+const client = new MongoClient(process.env.MONGODB_URI!);
+await client.connect();
+
+const avesServer = new AvesServer({
+  mongo: {
+    client,
+    dbName: "aves",
+  },
+});
+```
+
+MongoStorage 会持久化房间、用户房间绑定和参与者元数据。WebSocket 连接仍然只存在于当前 Node.js 进程中，因此 MongoStorage 适合单实例持久化或外部系统审计；多实例实时信令转发仍建议使用 RedisStorage。
 
 ### 存储事件钩子
 
@@ -111,6 +150,14 @@ interface AvesServerConfig {
   debug?: boolean;         // 调试日志（默认：false）
   roomTimeout?: number;    // 空房间自动清理延迟 ms（默认：0，永不按计时器清理）
   redis?: Redis | RedisConfig;
+  mongo?: {
+    uri?: string;
+    dbName?: string;       // 默认："aves"
+    collectionPrefix?: string; // 默认："aves"
+    client?: MongoClient;
+    db?: Db;
+    closeClientOnClose?: boolean;
+  };
   rateLimit?: {
     maxTokens?: number;    // 突发消息数（默认：60）
     refillRate?: number;   // 每秒补充令牌数（默认：10）
@@ -224,7 +271,7 @@ interface CreateRoomOptions {
 interface HealthStatus {
   connections: number;
   rooms: number;
-  storage: "memory" | "redis";
+  storage: "memory" | "redis" | "mongodb";
   roomTimeout: number;
   uptime: number;
 }
@@ -287,18 +334,42 @@ const redis = new Redis({
 const storage = new RedisStorage(redis, "aves");
 ```
 
+### MongoStorage
+
+基于 MongoDB 的存储实现，默认使用三个集合：
+
+- `aves_rooms`
+- `aves_user_rooms`
+- `aves_participants`
+
+```typescript
+import { MongoClient } from "mongodb";
+import { MongoStorage } from "@yrzhao/aves-node";
+
+const client = new MongoClient(process.env.MONGODB_URI!);
+await client.connect();
+
+const storage = new MongoStorage(client.db("aves"), {
+  collectionPrefix: "aves",
+  client,
+  closeClientOnClose: true,
+});
+```
+
+MongoStorage 使用原子 upsert 保护 `userId -> roomId` 绑定，避免同一用户被重复加入不同房间。远端或重启后无法恢复的 WebSocket 不会返回给信令路由，避免向无效连接发送消息。
+
 ### BaseStorage
 
-抽象基类，提供事件钩子系统。MemoryStorage 和 RedisStorage 均继承自此类。
+抽象基类，提供事件钩子系统。MemoryStorage、RedisStorage 和 MongoStorage 均继承自此类。
 
 ## 性能
 
 - 发布包仅包含 `dist`、`README.md`、`LICENSE` 和 `package.json`
-- 当前 dry-run tarball 约 25 KiB，解包后约 175 KiB
-- 单实例适合中小型部署；RedisStorage 可用于多实例横向扩展
+- 当前 dry-run tarball 约 28 KiB，解包后约 209 KiB
+- 单实例适合中小型部署；MongoStorage 可持久化会话状态；RedisStorage 可用于多实例横向扩展和实时信令转发
 - 房间内广播复杂度 O(n)，n 为房间参与者数；信令服务器不转发媒体流
 - 默认 `rateLimit` 为 60 个突发 token、每秒补 10 个 token；默认 `maxMessageSize` 为 64 KiB
-- 实际连接上限取决于 Node.js、操作系统 fd 限制、负载均衡和 Redis 延迟
+- 实际连接上限取决于 Node.js、操作系统 fd 限制、负载均衡、Redis 延迟和 MongoDB 写入延迟
 
 ## 许可证
 

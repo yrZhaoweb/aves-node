@@ -1448,6 +1448,30 @@ describe("AvesServer", () => {
       redisServer.close();
     });
 
+    it("should initialize MongoDB storage from an injected database", async () => {
+      const collection = {
+        createIndex: jest.fn().mockResolvedValue("index"),
+        find: jest.fn(() => ({
+          toArray: jest.fn().mockResolvedValue([]),
+        })),
+      };
+      const mongoDb = {
+        collection: jest.fn(() => collection),
+      };
+      const mongoServer = createTestServer({
+        mongo: { db: mongoDb as any },
+      });
+
+      await expect(mongoServer.getHealth()).resolves.toEqual(
+        expect.objectContaining({ storage: "mongodb" }),
+      );
+      expect(mongoDb.collection).toHaveBeenCalledWith("aves_rooms");
+      expect(mongoDb.collection).toHaveBeenCalledWith("aves_user_rooms");
+      expect(mongoDb.collection).toHaveBeenCalledWith("aves_participants");
+
+      mongoServer.close();
+    });
+
     it("should report asynchronous storage close failures to the logger", async () => {
       const logger = {
         error: jest.fn(),

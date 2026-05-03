@@ -1,5 +1,8 @@
-import type { Redis } from "ioredis";
-import { Room, ParticipantInfo } from "../types/types";
+import type {
+  ParticipantInfo,
+  RedisClientLike,
+  Room,
+} from "../types/types";
 import { WebSocket } from "ws";
 import { BaseStorage } from "./BaseStorage";
 import * as crypto from "crypto";
@@ -16,8 +19,8 @@ interface RemoteSignalEnvelope {
 }
 
 export class RedisStorage extends BaseStorage {
-  private readonly redis: Redis;
-  private readonly subscriber: Redis;
+  private readonly redis: RedisClientLike;
+  private readonly subscriber: RedisClientLike;
   private readonly socketMap: Map<string, WebSocket> = new Map();
   private readonly keyPrefix: string;
   private readonly instanceId: string;
@@ -25,7 +28,7 @@ export class RedisStorage extends BaseStorage {
   private readonly subscriptionReady: Promise<void>;
   private closed = false;
 
-  constructor(redis: Redis, keyPrefix: string = "aves") {
+  constructor(redis: RedisClientLike, keyPrefix: string = "aves") {
     super();
     this.redis = redis;
     this.keyPrefix = keyPrefix;

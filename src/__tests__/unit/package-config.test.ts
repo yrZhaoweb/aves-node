@@ -1,5 +1,6 @@
 import { execFileSync } from "child_process";
 import {
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -26,6 +27,25 @@ describe("package configuration", () => {
     );
   });
 
+  it("should publish MongoDB as an optional peer dependency", () => {
+    const packageJsonPath = join(__dirname, "../../../package.json");
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+      devDependencies?: Record<string, string>;
+    };
+
+    expect(packageJson.peerDependencies?.mongodb).toEqual(
+      expect.stringMatching(/\^7\./),
+    );
+    expect(packageJson.peerDependenciesMeta?.mongodb).toEqual({
+      optional: true,
+    });
+    expect(packageJson.devDependencies?.mongodb).toEqual(
+      expect.stringMatching(/\^7\./),
+    );
+  });
+
   it("should publish explicit CommonJS, ESM, and type entry points", () => {
     const packageJsonPath = join(__dirname, "../../../package.json");
     const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
@@ -49,6 +69,88 @@ describe("package configuration", () => {
     expect(packageJson.scripts?.["build:esm"]).toContain(
       "scripts/fix-esm-imports.js",
     );
+  });
+
+  it("should expose root types without requiring optional storage peers", () => {
+    const fixtureDir = mkdtempSync(join(tmpdir(), "aves-node-types-"));
+    const packageRoot = join(__dirname, "../../..");
+    const declarationsDir = join(fixtureDir, "declarations");
+    const consumerDir = join(fixtureDir, "consumer");
+    const installedPackageDir = join(
+      consumerDir,
+      "node_modules",
+      "@yrzhao",
+      "aves-node",
+    );
+    const tscPath = require.resolve("typescript/bin/tsc");
+
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          tscPath,
+          "--project",
+          join(packageRoot, "tsconfig.json"),
+          "--declaration",
+          "--emitDeclarationOnly",
+          "--outDir",
+          declarationsDir,
+        ],
+        { cwd: packageRoot },
+      );
+
+      mkdirSync(installedPackageDir, { recursive: true });
+      cpSync(declarationsDir, join(installedPackageDir, "dist"), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(installedPackageDir, "package.json"),
+        JSON.stringify(
+          {
+            name: "@yrzhao/aves-node",
+            types: "dist/index.d.ts",
+          },
+          null,
+          2,
+        ),
+      );
+      writeFileSync(
+        join(consumerDir, "index.ts"),
+        [
+          'import { AvesServer, type AvesServerConfig } from "@yrzhao/aves-node";',
+          "",
+          "const config: AvesServerConfig = {};",
+          "new AvesServer(config);",
+        ].join("\n"),
+      );
+      writeFileSync(
+        join(consumerDir, "tsconfig.json"),
+        JSON.stringify(
+          {
+            compilerOptions: {
+              module: "commonjs",
+              target: "es2020",
+              strict: true,
+              skipLibCheck: false,
+              moduleResolution: "node",
+              typeRoots: [join(packageRoot, "node_modules", "@types")],
+              types: ["node"],
+            },
+            include: ["index.ts"],
+          },
+          null,
+          2,
+        ),
+      );
+
+      execFileSync(
+        process.execPath,
+        [tscPath, "--project", join(consumerDir, "tsconfig.json"), "--noEmit"],
+        { cwd: consumerDir },
+      );
+    } finally {
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
   });
 
   it("should rewrite built ESM relative imports for Node resolution", () => {

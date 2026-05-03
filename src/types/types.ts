@@ -1,6 +1,5 @@
 // Shared types for aves-node
 import { WebSocket } from "ws";
-import type { Redis } from "ioredis";
 
 export interface Participant {
   id: string;
@@ -47,11 +46,86 @@ export interface RedisConfig {
   db?: number;
 }
 
+export type RedisMessageListener = (channel: string, payload: string) => void;
+
+export interface RedisPipelineLike {
+  hgetall(key: string): RedisPipelineLike;
+  exec(): Promise<Array<[Error | null, unknown]> | null>;
+}
+
+export interface RedisClientLike {
+  duplicate(): RedisClientLike;
+  on(event: "message", listener: RedisMessageListener): unknown;
+  removeListener(event: "message", listener: RedisMessageListener): unknown;
+  subscribe(channel: string): Promise<unknown>;
+  unsubscribe(channel: string): Promise<unknown>;
+  quit(): Promise<unknown>;
+  publish(channel: string, payload: string): Promise<unknown>;
+  hset(key: string, values: Record<string, string>): Promise<unknown>;
+  hgetall(key: string): Promise<Record<string, string>>;
+  sadd(key: string, ...members: string[]): Promise<unknown>;
+  smembers(key: string): Promise<string[]>;
+  del(...keys: string[]): Promise<unknown>;
+  srem(key: string, ...members: string[]): Promise<unknown>;
+  sismember(key: string, member: string): Promise<number>;
+  set(key: string, value: string, mode: "NX"): Promise<"OK" | null>;
+  get(key: string): Promise<string | null>;
+  pipeline(): RedisPipelineLike;
+}
+
+export interface MongoCursorLike<TDocument = any> {
+  toArray(): Promise<TDocument[]>;
+}
+
+export interface MongoCollectionLike<TDocument = any> {
+  createIndex(index: any, options?: any): Promise<string>;
+  replaceOne(
+    filter: any,
+    replacement: any,
+    options?: any,
+  ): Promise<unknown>;
+  updateOne(
+    filter: any,
+    update: any,
+    options?: any,
+  ): Promise<{ upsertedCount?: number }>;
+  findOne(filter: any): Promise<any | null>;
+  find(filter?: any): MongoCursorLike<any>;
+  deleteOne(filter: any): Promise<unknown>;
+  deleteMany(filter: any): Promise<unknown>;
+}
+
+export interface MongoDbLike {
+  collection<TDocument>(name: string): MongoCollectionLike<TDocument>;
+}
+
+export interface MongoClientLike {
+  connect(): Promise<unknown>;
+  db(dbName?: string): MongoDbLike;
+  close(): Promise<unknown>;
+}
+
+export interface MongoConfig {
+  /** MongoDB connection string. Used when client/db is not provided. */
+  uri?: string;
+  /** Database name. Defaults to "aves". */
+  dbName?: string;
+  /** Prefix for collections. Defaults to "aves". */
+  collectionPrefix?: string;
+  /** Preconfigured MongoClient. The server does not close injected clients by default. */
+  client?: MongoClientLike;
+  /** Preconfigured MongoDB database. */
+  db?: MongoDbLike;
+  /** Close an injected client when AvesServer.close() is called. Default false. */
+  closeClientOnClose?: boolean;
+}
+
 export interface AvesServerConfig {
   debug?: boolean;
   /** Milliseconds before an empty room is automatically deleted. 0 = never. */
   roomTimeout?: number;
-  redis?: Redis | RedisConfig;
+  redis?: RedisClientLike | RedisConfig;
+  mongo?: MongoConfig;
   /** Token-bucket rate limiting configuration. */
   rateLimit?: {
     maxTokens?: number;
@@ -86,7 +160,7 @@ export interface HealthStatus {
   /** Total number of rooms (including empty ones not yet cleaned up). */
   rooms: number;
   /** Storage backend type. */
-  storage: "memory" | "redis";
+  storage: "memory" | "redis" | "mongodb";
   /** Configured room timeout in milliseconds. 0 = never. */
   roomTimeout: number;
   /** Server uptime in milliseconds since construction. */

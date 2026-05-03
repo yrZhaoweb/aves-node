@@ -1,5 +1,4 @@
 import { WebSocket } from "ws";
-import type { Redis } from "ioredis";
 import type { IncomingMessage } from "http";
 import { AvesError } from "./AvesError";
 import { RoomManager } from "./RoomManager";
@@ -9,9 +8,12 @@ import {
   AvesServerConfig,
   AvesLogger,
   HealthStatus,
+  MongoConfig,
+  MongoClientLike,
   RoomInfo,
   InboundSignalingMessage,
   OutboundSignalingMessage,
+  RedisClientLike,
   RedisConfig,
   SignalingErrorCode,
   SignalingErrorPayload,
@@ -20,6 +22,7 @@ import {
 import { IDataStorage } from "../storage/IDataStorage";
 import { MemoryStorage } from "../storage/MemoryStorage";
 import { RedisStorage } from "../storage/RedisStorage";
+import { MongoStorage } from "../storage/MongoStorage";
 import * as crypto from "crypto";
 
 type NormalizedAvesLogger = Required<AvesLogger>;
@@ -79,6 +82,7 @@ export class AvesServer {
       debug: config?.debug ?? false,
       roomTimeout: config?.roomTimeout ?? 0,
       redis: config?.redis,
+      mongo: config?.mongo,
       rateLimit: config?.rateLimit ?? { maxTokens: 60, refillRate: 10 },
       maxMessageSize: config?.maxMessageSize ?? 65536,
     };
@@ -103,10 +107,24 @@ export class AvesServer {
   }
 
   private initializeStorage(): IDataStorage {
+    if (this.config.redis && this.config.mongo) {
+      throw new AvesError({
+        message: "Configure either redis or mongo storage, not both",
+        code: "SERVER_ERROR",
+        stage: "server",
+        retryable: false,
+      });
+    }
+
     const redis = this.config.redis;
     if (redis) {
       const redisClient = isRedisClient(redis) ? redis : createRedisClient(redis);
       return new RedisStorage(redisClient);
+    }
+
+    const mongo = this.config.mongo;
+    if (mongo) {
+      return createMongoStorage(mongo);
     }
 
     return new MemoryStorage();
@@ -791,11 +809,15 @@ export class AvesServer {
    */
   async getHealth(): Promise<HealthStatus> {
     const rooms = await this.roomManager.getAllRooms();
-    const isRedis = this.config.redis !== undefined;
+    const storage = this.config.redis
+      ? "redis"
+      : this.config.mongo
+        ? "mongodb"
+        : "memory";
     return {
       connections: this.connections.size,
       rooms: rooms.length,
-      storage: isRedis ? "redis" : "memory",
+      storage,
       roomTimeout: this.config.roomTimeout ?? 0,
       uptime: Date.now() - this.startTime,
     };
@@ -968,16 +990,25 @@ export class AvesServer {
   }
 }
 
-type RedisConstructor = new (options: RedisConfig) => Redis;
+type RedisConstructor = new (options: RedisConfig) => RedisClientLike;
 type RedisModule =
   | RedisConstructor
   | {
       Redis?: RedisConstructor;
       default?: RedisConstructor;
     };
+type MongoClientConstructor = new (uri: string) => MongoClientLike;
+type MongoModule = {
+  MongoClient?: MongoClientConstructor;
+  default?: {
+    MongoClient?: MongoClientConstructor;
+  };
+};
 
-function isRedisClient(value: Redis | RedisConfig): value is Redis {
-  const candidate = value as Partial<Redis>;
+function isRedisClient(
+  value: RedisClientLike | RedisConfig,
+): value is RedisClientLike {
+  const candidate = value as Partial<RedisClientLike>;
   return (
     typeof candidate.duplicate === "function" &&
     typeof candidate.hgetall === "function" &&
@@ -985,7 +1016,7 @@ function isRedisClient(value: Redis | RedisConfig): value is Redis {
   );
 }
 
-function createRedisClient(redisConfig: RedisConfig): Redis {
+function createRedisClient(redisConfig: RedisConfig): RedisClientLike {
   const RedisClient = loadRedisConstructor();
   return new RedisClient({
     host: redisConfig.host || "localhost",
@@ -1019,6 +1050,77 @@ function loadRedisConstructor(): RedisConstructor {
 
   throw new AvesError({
     message: "Unable to load Redis constructor from ioredis",
+    code: "SERVER_ERROR",
+    stage: "server",
+    retryable: false,
+  });
+}
+
+function createMongoStorage(mongoConfig: MongoConfig): MongoStorage {
+  const collectionPrefix = mongoConfig.collectionPrefix ?? "aves";
+
+  if (mongoConfig.db) {
+    return new MongoStorage(mongoConfig.db, {
+      collectionPrefix,
+      client: mongoConfig.client,
+      closeClientOnClose: mongoConfig.closeClientOnClose ?? false,
+    });
+  }
+
+  if (mongoConfig.client) {
+    const ready = mongoConfig.client.connect();
+    const db = mongoConfig.client.db(mongoConfig.dbName ?? "aves");
+    return new MongoStorage(db, {
+      collectionPrefix,
+      client: mongoConfig.client,
+      closeClientOnClose: mongoConfig.closeClientOnClose ?? false,
+      ready,
+    });
+  }
+
+  if (mongoConfig.uri) {
+    const MongoClientCtor = loadMongoClientConstructor();
+    const client = new MongoClientCtor(mongoConfig.uri);
+    const ready = client.connect();
+    const db = client.db(mongoConfig.dbName ?? "aves");
+
+    return new MongoStorage(db, {
+      collectionPrefix,
+      client,
+      closeClientOnClose: true,
+      ready,
+    });
+  }
+
+  throw new AvesError({
+    message: "MongoDB storage requires mongo.uri, mongo.client, or mongo.db",
+    code: "SERVER_ERROR",
+    stage: "server",
+    retryable: false,
+  });
+}
+
+function loadMongoClientConstructor(): MongoClientConstructor {
+  try {
+    const mongoModule = require("mongodb") as MongoModule;
+    const MongoClientCtor =
+      mongoModule.MongoClient ?? mongoModule.default?.MongoClient;
+
+    if (MongoClientCtor) {
+      return MongoClientCtor;
+    }
+  } catch (error) {
+    throw new AvesError({
+      message: "MongoDB storage requires the optional mongodb dependency",
+      code: "SERVER_ERROR",
+      stage: "server",
+      retryable: false,
+      cause: error,
+    });
+  }
+
+  throw new AvesError({
+    message: "Unable to load MongoClient constructor from mongodb",
     code: "SERVER_ERROR",
     stage: "server",
     retryable: false,

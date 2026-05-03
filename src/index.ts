@@ -19,6 +19,8 @@ export type { IDataStorage } from "./storage/IDataStorage";
 export { BaseStorage } from "./storage/BaseStorage";
 export { MemoryStorage } from "./storage/MemoryStorage";
 export { RedisStorage } from "./storage/RedisStorage";
+export { MongoStorage } from "./storage/MongoStorage";
+export type { MongoStorageOptions } from "./storage/MongoStorage";
 
 // Storage events for user-defined persistence
 export type {
@@ -45,7 +47,15 @@ export type {
   Participant,
   AvesServerConfig,
   HealthStatus,
+  MongoConfig,
+  MongoClientLike,
+  MongoCollectionLike,
+  MongoCursorLike,
+  MongoDbLike,
+  RedisClientLike,
   RedisConfig,
+  RedisMessageListener,
+  RedisPipelineLike,
   RoomInfo,
   ParticipantInfo,
   Room,
