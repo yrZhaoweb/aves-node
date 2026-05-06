@@ -123,6 +123,38 @@ export class RoomManager {
   }
 
   /**
+   * Rebind an existing participant to a fresh socket without changing room
+   * membership. Used for reconnect restore during the server grace window.
+   */
+  async reconnectParticipant(
+    roomId: string,
+    userId: string,
+    userName: string,
+    socket: WebSocket,
+  ): Promise<boolean> {
+    const room = await this.storage.getRoom(roomId);
+    if (!room) {
+      return false;
+    }
+
+    const boundRoomId = await this.storage.getUserRoom(userId);
+    if (boundRoomId !== roomId) {
+      return false;
+    }
+
+    const existing = await this.storage.getParticipant(roomId, userId);
+    if (!existing) {
+      return false;
+    }
+
+    return await this.storage.setParticipant(roomId, userId, {
+      userId,
+      userName,
+      socket,
+    });
+  }
+
+  /**
    * Remove a user from a room
    * Automatically deletes the room if it becomes empty
    */

@@ -26,6 +26,10 @@ import { MongoStorage } from "../storage/MongoStorage";
 import * as crypto from "crypto";
 
 type NormalizedAvesLogger = Required<AvesLogger>;
+type PendingDisconnect = {
+  roomId: string;
+  timer: ReturnType<typeof setTimeout>;
+};
 
 function writeConsoleLog(
   level: "debug" | "info" | "warn" | "error",
@@ -67,6 +71,8 @@ export class AvesServer {
   private rateLimiter: RateLimiter;
   private maxMessageSize: number;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingDisconnects: Map<string, PendingDisconnect> = new Map();
+  private closing = false;
   private readonly startTime: number;
   private readonly logger: NormalizedAvesLogger;
 
@@ -81,6 +87,7 @@ export class AvesServer {
     this.config = {
       debug: config?.debug ?? false,
       roomTimeout: config?.roomTimeout ?? 0,
+      reconnectGraceMs: config?.reconnectGraceMs ?? 5000,
       redis: config?.redis,
       mongo: config?.mongo,
       rateLimit: config?.rateLimit ?? { maxTokens: 60, refillRate: 10 },
@@ -211,10 +218,14 @@ export class AvesServer {
 
       this.connections.delete(ws);
 
+      if (this.closing) {
+        return;
+      }
+
       if (currentUserId) {
         const disconnectedUserId = currentUserId;
         currentUserId = undefined;
-        this.handleDisconnection(disconnectedUserId);
+        void this.scheduleDisconnection(disconnectedUserId);
       }
     });
 
@@ -412,8 +423,51 @@ export class AvesServer {
       return;
     }
 
-    const currentParticipants =
-      await this.roomManager.getRoomParticipants(roomId);
+    const currentParticipants = (
+      await this.roomManager.getRoomParticipants(roomId)
+    ).filter((participant) => participant.id !== userId);
+
+    const pendingDisconnect = this.pendingDisconnects.get(userId);
+    if (pendingDisconnect?.roomId === roomId) {
+      const restored = await this.roomManager.reconnectParticipant(
+        roomId,
+        userId,
+        userName,
+        ws,
+      );
+
+      if (!restored) {
+        this.sendError(
+          ws,
+          this.createErrorPayload(
+            `Failed to restore participant ${userId} in room ${roomId}.`,
+            "ROOM_JOIN_FAILED",
+            "room",
+            false,
+            message.requestId,
+          ),
+        );
+        return;
+      }
+
+      this.cancelPendingDisconnect(userId);
+      setUserId(userId);
+
+      this.sendMessage(ws, {
+        type: "room-joined",
+        participants: currentParticipants,
+        userId,
+        requestId: message.requestId,
+      });
+
+      if (this.config.debug) {
+        this.logDebug("[AvesServer] User restored room session", {
+          userId,
+          roomId,
+        });
+      }
+      return;
+    }
 
     const success = await this.roomManager.joinRoom(
       roomId,
@@ -507,8 +561,9 @@ export class AvesServer {
     }
 
     setUserId(undefined);
+    this.cancelPendingDisconnect(userId);
     const roomId = await this.roomManager.getRoomIdByUserId(userId);
-    await this.handleDisconnection(userId);
+    await this.finalizeDisconnection(userId);
 
     if (roomId) {
       this.sendMessage(ws, {
@@ -521,10 +576,65 @@ export class AvesServer {
   }
 
   /**
-   * Handle user disconnection
+   * Defer a socket-level disconnect briefly so transient reconnects do not
+   * appear as real presence leaves to other participants.
+   */
+  private async scheduleDisconnection(userId: string): Promise<void> {
+    const roomId = await this.roomManager.getRoomIdByUserId(userId);
+
+    if (!roomId) {
+      return;
+    }
+
+    if ((this.config.reconnectGraceMs ?? 0) <= 0) {
+      await this.finalizeDisconnection(userId);
+      return;
+    }
+
+    this.cancelPendingDisconnect(userId);
+
+    const timer = setTimeout(() => {
+      void this.finalizePendingDisconnect(userId, roomId);
+    }, this.config.reconnectGraceMs);
+    this.pendingDisconnects.set(userId, { roomId, timer });
+
+    if (this.config.debug) {
+      this.logDebug("[AvesServer] User disconnect pending grace", {
+        userId,
+        roomId,
+        reconnectGraceMs: this.config.reconnectGraceMs,
+      });
+    }
+  }
+
+  private async finalizePendingDisconnect(
+    userId: string,
+    roomId: string,
+  ): Promise<void> {
+    const pending = this.pendingDisconnects.get(userId);
+    if (!pending || pending.roomId !== roomId) {
+      return;
+    }
+
+    this.pendingDisconnects.delete(userId);
+    await this.finalizeDisconnection(userId);
+  }
+
+  private cancelPendingDisconnect(userId: string): void {
+    const pending = this.pendingDisconnects.get(userId);
+    if (!pending) {
+      return;
+    }
+
+    clearTimeout(pending.timer);
+    this.pendingDisconnects.delete(userId);
+  }
+
+  /**
+   * Handle confirmed user departure.
    * Requirements: 10.1, 10.2
    */
-  private async handleDisconnection(userId: string): Promise<void> {
+  private async finalizeDisconnection(userId: string): Promise<void> {
     const roomId = await this.roomManager.getRoomIdByUserId(userId);
 
     if (!roomId) {
@@ -827,10 +937,17 @@ export class AvesServer {
    * Close the server and clean up resources
    */
   close(): void {
+    this.closing = true;
+
     if (this.cleanupTimer !== null) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }
+
+    this.pendingDisconnects.forEach((pending) => {
+      clearTimeout(pending.timer);
+    });
+    this.pendingDisconnects.clear();
 
     if (this.config.debug) {
       this.logDebug("[AvesServer] Closing server");

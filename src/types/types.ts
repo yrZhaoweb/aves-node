@@ -124,6 +124,12 @@ export interface AvesServerConfig {
   debug?: boolean;
   /** Milliseconds before an empty room is automatically deleted. 0 = never. */
   roomTimeout?: number;
+  /**
+   * Milliseconds to keep a disconnected participant present before broadcasting
+   * user-left. A reconnect with the same userId during this window restores the
+   * participant without a leave/join flicker. Default 5000.
+   */
+  reconnectGraceMs?: number;
   redis?: RedisClientLike | RedisConfig;
   mongo?: MongoConfig;
   /** Token-bucket rate limiting configuration. */

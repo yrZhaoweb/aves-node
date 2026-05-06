@@ -27,6 +27,8 @@ describe("AvesServer", () => {
 
   // Helper to wait for async message processing
   const waitForMessages = () => new Promise((resolve) => setImmediate(resolve));
+  const wait = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
 
   describe("Room Operations", () => {
     it("should handle create-room message", async () => {
@@ -268,6 +270,8 @@ describe("AvesServer", () => {
 
   describe("Connection Lifecycle", () => {
     it("should handle connection close and broadcast user-left", async () => {
+      server.close();
+      server = createTestServer({ reconnectGraceMs: 0 });
       const ws1 = new MockWebSocket() as unknown as WebSocket;
       const ws2 = new MockWebSocket() as unknown as WebSocket;
 
@@ -310,6 +314,197 @@ describe("AvesServer", () => {
       const leftMsg = JSON.parse((ws2 as any).sentMessages[0]);
       expect(leftMsg.type).toBe("user-left");
       expect(leftMsg.userId).toBe("user1");
+    });
+
+    it("should not broadcast user-left when the same user rejoins within reconnect grace", async () => {
+      server.close();
+      server = createTestServer({ reconnectGraceMs: 50 });
+      const ws1 = new MockWebSocket() as unknown as WebSocket;
+      const ws2 = new MockWebSocket() as unknown as WebSocket;
+      const ws1Reconnect = new MockWebSocket() as unknown as WebSocket;
+
+      server.handleConnection(ws1);
+      server.handleConnection(ws2);
+
+      (ws1 as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user1",
+            userName: "Alice",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws2 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user2",
+            userName: "Bob",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws2 as any).sentMessages = [];
+      (ws1 as any).emit("close");
+      await waitForMessages();
+
+      expect((ws2 as any).sentMessages).toHaveLength(0);
+
+      server.handleConnection(ws1Reconnect);
+      (ws1Reconnect as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user1",
+            userName: "Alice",
+            requestId: "rejoin-1",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      const response = JSON.parse((ws1Reconnect as any).sentMessages[0]);
+      expect(response).toEqual({
+        type: "room-joined",
+        participants: [{ id: "user2", name: "Bob" }],
+        userId: "user1",
+        requestId: "rejoin-1",
+      });
+
+      await wait(75);
+      await waitForMessages();
+
+      expect((ws2 as any).sentMessages).toHaveLength(0);
+    });
+
+    it("should broadcast user-left after reconnect grace expires", async () => {
+      server.close();
+      server = createTestServer({ reconnectGraceMs: 10 });
+      const ws1 = new MockWebSocket() as unknown as WebSocket;
+      const ws2 = new MockWebSocket() as unknown as WebSocket;
+
+      server.handleConnection(ws1);
+      server.handleConnection(ws2);
+
+      (ws1 as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user1",
+            userName: "Alice",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws2 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user2",
+            userName: "Bob",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws2 as any).sentMessages = [];
+      (ws1 as any).emit("close");
+      await wait(25);
+      await waitForMessages();
+
+      expect((ws2 as any).sentMessages).toHaveLength(1);
+      expect(JSON.parse((ws2 as any).sentMessages[0])).toEqual({
+        type: "user-left",
+        userId: "user1",
+      });
+    });
+
+    it("should broadcast explicit leave immediately when reconnect grace is enabled", async () => {
+      server.close();
+      server = createTestServer({ reconnectGraceMs: 1000 });
+      const ws1 = new MockWebSocket() as unknown as WebSocket;
+      const ws2 = new MockWebSocket() as unknown as WebSocket;
+
+      server.handleConnection(ws1);
+      server.handleConnection(ws2);
+
+      (ws1 as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId = JSON.parse((ws1 as any).sentMessages[0]).roomId;
+
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user1",
+            userName: "Alice",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws2 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "user2",
+            userName: "Bob",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      (ws1 as any).sentMessages = [];
+      (ws2 as any).sentMessages = [];
+      (ws1 as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "leave-room",
+            userId: "user1",
+            requestId: "leave-now",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      expect(JSON.parse((ws1 as any).sentMessages[0])).toEqual({
+        type: "room-left",
+        roomId,
+        userId: "user1",
+        requestId: "leave-now",
+      });
+      expect(JSON.parse((ws2 as any).sentMessages[0])).toEqual({
+        type: "user-left",
+        userId: "user1",
+      });
     });
   });
 
@@ -886,12 +1081,12 @@ describe("AvesServer", () => {
       const leaveGate = new Promise<void>((resolve) => {
         (server as any).__resolveLeaveGate = resolve;
       });
-      const originalHandleDisconnection = (server as any).handleDisconnection.bind(server);
+      const originalFinalizeDisconnection = (server as any).finalizeDisconnection.bind(server);
       jest
-        .spyOn(server as any, "handleDisconnection")
+        .spyOn(server as any, "finalizeDisconnection")
         .mockImplementation(async (userId: string) => {
           await leaveGate;
-          return originalHandleDisconnection(userId);
+          return originalFinalizeDisconnection(userId);
         });
 
       (ws1 as any).sentMessages = [];
