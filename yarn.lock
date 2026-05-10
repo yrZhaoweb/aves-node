@@ -654,7 +654,7 @@
     "@types/yargs-parser" "*"
 
 "@yrzhao/aves-core@file:../aves-core":
-  version "0.3.0"
+  version "1.1.0"
   resolved "file:../aves-core"
 
 ansi-escapes@^4.2.1:
