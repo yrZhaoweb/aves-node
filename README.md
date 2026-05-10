@@ -1,103 +1,157 @@
 # Aves Node
 
-Node.js WebRTC 信令服务器库。负责房间管理和信令转发，不传输媒体流。支持可插拔存储和多实例部署。
+Node.js WebRTC signaling server library. `@yrzhao/aves-node` manages rooms, participants, and WebRTC signaling messages over WebSocket. It does not relay media, data-channel messages, audio, video, or files.
 
-版本：`1.0.0`
+Version: `1.1.0`
 
-## 安装
+## Install
 
 ```bash
 npm install @yrzhao/aves-node ws
 ```
 
-可选存储：`npm install ioredis`（Redis）或 `npm install mongodb`（MongoDB）
+Optional storage backends:
 
-## 快速开始
+```bash
+npm install ioredis
+npm install mongodb
+```
 
-```typescript
+## Quick Start
+
+```ts
 import { WebSocketServer } from "ws";
 import { AvesServer } from "@yrzhao/aves-node";
 
+const aves = new AvesServer({
+  roomTimeout: 5 * 60 * 1000,
+  rateLimit: { maxTokens: 120, refillRate: 30 },
+  maxMessageSize: 256 * 1024,
+});
+
 const wss = new WebSocketServer({ port: 8080 });
-const aves = new AvesServer({ debug: true });
-
-wss.on("connection", (ws) => aves.handleConnection(ws));
+wss.on("connection", (ws, req) => {
+  aves.handleConnection(ws, req);
+});
 ```
 
-## 存储
+## What It Does
 
-| 存储 | 说明 | 适用场景 |
-|------|------|----------|
-| `MemoryStorage` | 默认，内置 | 单实例 |
-| `RedisStorage` | pub/sub 跨实例 | 多实例部署 |
-| `MongoStorage` | 持久化 | 会话审计 |
+- Creates rooms and tracks participants.
+- Routes SDP offers, SDP answers, and ICE candidates between peers.
+- Enforces same-room signaling and `fromId` authentication per WebSocket connection.
+- Supports room passwords, max capacity, reconnect grace windows, rate limits, message size limits, health, and metrics.
+- Supports Memory, Redis, and MongoDB storage implementations.
 
-```typescript
-// Redis
-new AvesServer({ redis: { host: "127.0.0.1", port: 6379 } });
+## What It Does Not Do
 
-// MongoDB
-new AvesServer({ mongo: { uri: process.env.MONGODB_URI, dbName: "aves" } });
-```
+- It does not serve your frontend.
+- It does not terminate TLS by itself. Put it behind HTTPS/WSS infrastructure.
+- It does not relay WebRTC traffic. Media and data flow directly between browsers.
+- It does not provide product authentication. Add auth at your WebSocket boundary or application layer.
+- MongoDB storage is not a realtime cross-instance signaling bus.
 
-## 事件钩子
+## Storage Choices
 
-```typescript
-const storage = aves.getStorage();
-storage.addListener({
-  onBeforeChange: (event) => {
-    console.log(`${event.type}: ${event.roomId}`);
-    return true;  // 返回 false 取消操作
+| Backend | Best For | Notes |
+| --- | --- | --- |
+| `MemoryStorage` | Local development, tests, single instance | No persistence, no cross-instance routing |
+| `RedisStorage` | Multi-instance realtime signaling | Uses pub/sub to route signals to sockets on other instances |
+| `MongoStorage` | Persistence and audit-like state | Stores room state, but does not forward realtime messages across instances |
+
+See [STORAGE_GUIDE.md](docs/STORAGE_GUIDE.md).
+
+## Production Configuration
+
+```ts
+const aves = new AvesServer({
+  debug: false,
+  roomTimeout: 5 * 60 * 1000,
+  reconnectGraceMs: 5000,
+  maxMessageSize: 256 * 1024,
+  rateLimit: { maxTokens: 120, refillRate: 30 },
+  logger: {
+    info: (message, context) => logger.info(context, message),
+    warn: (message, context) => logger.warn(context, message),
+    error: (message, context) => logger.error(context, message),
+    debug: (message, context) => logger.debug(context, message),
   },
 });
 ```
 
-支持事件：`room:create`、`room:update`、`room:delete`、`participant:join`、`participant:leave`、`user:bindRoom`、`user:unbindRoom`
+## Redis
 
-## 配置
-
-```typescript
+```ts
 new AvesServer({
-  debug: false,
-  roomTimeout: 0,              // 空房间清理延迟（ms）
-  maxMessageSize: 65536,       // 最大消息体（bytes）
-  rateLimit: { maxTokens: 60, refillRate: 10 },
-  redis: { host, port, password, db },
-  mongo: { uri, dbName, collectionPrefix },
+  redis: {
+    host: process.env.REDIS_HOST,
+    port: Number(process.env.REDIS_PORT || 6379),
+    password: process.env.REDIS_PASSWORD,
+  },
 });
 ```
 
+## MongoDB
+
+```ts
+new AvesServer({
+  mongo: {
+    uri: process.env.MONGODB_URI,
+    dbName: "aves",
+    collectionPrefix: "aves",
+  },
+});
+```
+
+## Health And Metrics
+
+```ts
+const health = await aves.getHealth();
+const metrics = await aves.getMetrics();
+const storageType = aves.getStorageType();
+```
+
+Expose these from your HTTP server for load balancers and monitoring.
+
 ## API
 
-| 方法 | 返回 | 说明 |
-|------|------|------|
-| `handleConnection(ws)` | `void` | 处理 WebSocket 连接 |
-| `getRoomInfo(roomId)` | `Promise<RoomInfo>` | 房间信息 |
-| `getAllRooms()` | `Promise<RoomInfo[]>` | 所有房间 |
-| `getHealth()` | `Promise<HealthStatus>` | 健康状态 |
-| `getStorage()` | `IDataStorage` | 存储实例 |
-| `close()` | `void` | 关闭服务器 |
+| Method | Returns | Description |
+| --- | --- | --- |
+| `handleConnection(ws, req?)` | `void` | Register a WebSocket connection |
+| `getRoomInfo(roomId)` | `Promise<RoomInfo \| null>` | Inspect one room |
+| `getAllRooms()` | `Promise<RoomInfo[]>` | Inspect all rooms |
+| `getHealth()` | `Promise<HealthStatus>` | Lightweight health summary |
+| `getMetrics()` | `Promise<ServerMetrics>` | Operational metrics |
+| `getStorageType()` | `"memory" \| "redis" \| "mongodb"` | Current storage backend |
+| `getStorage()` | `IDataStorage` | Storage instance for event listeners |
+| `close()` | `Promise<void>` | Close timers, sockets, and storage |
 
-## 消息协议
+## Protocol
 
-### 客户端 → 服务器
+Client to server:
 
-| type | 必需字段 | 说明 |
-|------|----------|------|
-| `create-room` | — | 创建房间 |
-| `join-room` | `roomId`, `userName` | 加入房间 |
-| `leave-room` | `userId` | 离开房间 |
-| `offer` | `fromId`, `targetId`, `offer` | WebRTC offer |
-| `answer` | `fromId`, `targetId`, `answer` | WebRTC answer |
-| `ice-candidate` | `fromId`, `targetId`, `candidate` | ICE candidate |
+- `create-room`
+- `join-room`
+- `leave-room`
+- `offer`
+- `answer`
+- `ice-candidate`
 
-### 服务器 → 客户端
+Server to client:
 
-`room-created`、`room-joined`、`room-left`、`user-joined`、`user-left`、`offer`、`answer`、`ice-candidate`、`error`
+- `room-created`
+- `room-joined`
+- `room-left`
+- `user-joined`
+- `user-left`
+- `offer`
+- `answer`
+- `ice-candidate`
+- `error`
 
-### 错误格式
+Errors use:
 
-```typescript
+```ts
 interface SignalingErrorPayload {
   message: string;
   code: SignalingErrorCode;
@@ -107,34 +161,15 @@ interface SignalingErrorPayload {
 }
 ```
 
-### 鉴权
+## Production Notes
 
-服务器校验：`fromId` 一致性、跨房间隔离。
+- Use WSS in production.
+- Put the WebSocket server behind a reverse proxy that supports upgrade headers.
+- Enforce product authentication before or during room join.
+- Use Redis for horizontally scaled realtime signaling.
+- Tune rate limits and message size for your traffic profile.
+- Monitor `getMetrics()` and storage errors.
 
-## 类型
-
-```typescript
-interface RoomInfo {
-  id: string;
-  name?: string;
-  maxCapacity?: number;
-  hasPassword: boolean;
-  participantCount: number;
-  createdAt: number;
-}
-
-interface HealthStatus {
-  connections: number;
-  rooms: number;
-  storage: "memory" | "redis" | "mongodb";
-  uptime: number;
-}
-```
-
-## 发布信息
-
-- 包大小：~28 KiB gzip
-- O(n) 广播复杂度
-- 支持 Express 集成
+See [PRODUCTION.md](docs/PRODUCTION.md).
 
 MIT
