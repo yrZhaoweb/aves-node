@@ -60,4 +60,8 @@ export class RateLimiter {
       }
     }
   }
+
+  getBucketCount(): number {
+    return this.buckets.size;
+  }
 }

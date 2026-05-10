@@ -18,6 +18,7 @@ import {
   SignalingErrorCode,
   SignalingErrorPayload,
   SignalingErrorStage,
+  ServerMetrics,
 } from "../types/types";
 import { IDataStorage } from "../storage/IDataStorage";
 import { MemoryStorage } from "../storage/MemoryStorage";
@@ -919,24 +920,48 @@ export class AvesServer {
    */
   async getHealth(): Promise<HealthStatus> {
     const rooms = await this.roomManager.getAllRooms();
-    const storage = this.config.redis
+    return {
+      connections: this.connections.size,
+      rooms: rooms.length,
+      storage: this.getStorageType(),
+      roomTimeout: this.config.roomTimeout ?? 0,
+      uptime: Date.now() - this.startTime,
+    };
+  }
+
+  getStorageType(): HealthStatus["storage"] {
+    return this.config.redis
       ? "redis"
       : this.config.mongo
         ? "mongodb"
         : "memory";
+  }
+
+  async getMetrics(): Promise<ServerMetrics> {
+    const rooms = await this.roomManager.getAllRooms();
+    const participants = rooms.reduce(
+      (count, room) => count + room.participantCount,
+      0,
+    );
+
     return {
       connections: this.connections.size,
       rooms: rooms.length,
-      storage,
+      participants,
+      pendingDisconnects: this.pendingDisconnects.size,
+      storage: this.getStorageType(),
       roomTimeout: this.config.roomTimeout ?? 0,
       uptime: Date.now() - this.startTime,
+      rateLimitBuckets: this.rateLimiter.getBucketCount(),
+      reconnectGraceMs: this.config.reconnectGraceMs ?? 0,
+      maxMessageSize: this.maxMessageSize,
     };
   }
 
   /**
    * Close the server and clean up resources
    */
-  close(): void {
+  async close(): Promise<void> {
     this.closing = true;
 
     if (this.cleanupTimer !== null) {
@@ -962,11 +987,10 @@ export class AvesServer {
     }
     this.connections.clear();
 
-    const storageCloseResult = this.storage.close?.();
-    if (storageCloseResult instanceof Promise) {
-      void storageCloseResult.catch((error) => {
+    try {
+      await this.storage.close?.();
+    } catch (error) {
         this.logger.error("[AvesServer] Failed to close storage", { error });
-      });
     }
 
     if (this.config.debug) {

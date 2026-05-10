@@ -1680,7 +1680,7 @@ describe("AvesServer", () => {
         close: jest.fn(() => Promise.reject(closeError)),
       };
 
-      closeServer.close();
+      await closeServer.close();
       await waitForMessages();
 
       expect(logger.error).toHaveBeenCalledWith(
@@ -1759,6 +1759,49 @@ describe("AvesServer", () => {
 
     it("should return zero participants for a missing room", async () => {
       await expect(server.getParticipantCount("missing-room")).resolves.toBe(0);
+    });
+
+    it("should expose operational metrics", async () => {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      server.handleConnection(ws);
+
+      (ws as any).emit("message", Buffer.from(JSON.stringify({ type: "create-room" })));
+      await waitForMessages();
+      const roomId = JSON.parse((ws as any).sentMessages[0]).roomId;
+
+      (ws as any).emit(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "join-room",
+            roomId,
+            userId: "metrics-user",
+            userName: "Metric User",
+          }),
+        ),
+      );
+      await waitForMessages();
+
+      const metrics = await server.getMetrics();
+
+      expect(metrics).toEqual(
+        expect.objectContaining({
+          connections: 1,
+          rooms: 1,
+          participants: 1,
+          pendingDisconnects: 0,
+          storage: "memory",
+          roomTimeout: 0,
+          reconnectGraceMs: 5000,
+          maxMessageSize: 65536,
+          rateLimitBuckets: expect.any(Number),
+          uptime: expect.any(Number),
+        }),
+      );
+    });
+
+    it("should expose the active storage type", () => {
+      expect(server.getStorageType()).toBe("memory");
     });
   });
 

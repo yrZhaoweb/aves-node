@@ -47,6 +47,7 @@ export type {
   Participant,
   AvesServerConfig,
   HealthStatus,
+  ServerMetrics,
   MongoConfig,
   MongoClientLike,
   MongoCollectionLike,

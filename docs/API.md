@@ -1,6 +1,6 @@
 # aves-node API Reference
 
-**Package:** `@yrzhao/aves-node` (v0.2.0)
+**Package:** `@yrzhao/aves-node` (v1.1.0)
 
 aves-node provides a WebRTC signaling server for Node.js. It coordinates room management and signaling message forwarding over WebSocket. The server never relays WebRTC media traffic — it only facilitates peer discovery and SDP/ICE exchange.
 
@@ -95,7 +95,25 @@ storage.addListener({
 });
 ```
 
-#### `close(): void`
+#### `getStorageType(): "memory" | "redis" | "mongodb"`
+
+Returns the active storage backend.
+
+#### `getMetrics(): Promise<ServerMetrics>`
+
+Returns operational metrics suitable for monitoring endpoints:
+
+```ts
+interface ServerMetrics extends HealthStatus {
+  participants: number;
+  pendingDisconnects: number;
+  rateLimitBuckets: number;
+  reconnectGraceMs: number;
+  maxMessageSize: number;
+}
+```
+
+#### `close(): Promise<void>`
 
 Gracefully shut down the server:
 
@@ -103,6 +121,8 @@ Gracefully shut down the server:
 2. Closes all tracked WebSocket connections.
 3. Clears the connection set.
 4. Calls `close()` on the storage backend (for RedisStorage this unsubscribes and quits the subscriber client).
+
+Callers may ignore the returned promise for backward compatibility, but production shutdown should `await server.close()`.
 
 ---
 

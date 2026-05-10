@@ -173,6 +173,19 @@ export interface HealthStatus {
   uptime: number;
 }
 
+export interface ServerMetrics extends HealthStatus {
+  /** Number of participants across all active rooms. */
+  participants: number;
+  /** Number of disconnect grace timers currently waiting to finalize. */
+  pendingDisconnects: number;
+  /** Number of active rate-limit buckets. */
+  rateLimitBuckets: number;
+  /** Configured reconnect grace window in milliseconds. */
+  reconnectGraceMs: number;
+  /** Configured maximum incoming WebSocket message size in bytes. */
+  maxMessageSize: number;
+}
+
 // Internal types
 export interface ParticipantInfo {
   userId: string;
